@@ -2,7 +2,7 @@ import { createBrowserRouter, Outlet } from "react-router-dom";
 
 import { AnalyticsTracker } from "@/components/layout/analytics-tracker";
 import { AuthGuard } from "@/components/auth-guard";
-import { OAuthCallback } from "@/components/oauth-callback";
+import { OAuthCallback } from "@/pages/oauth-callback";
 import UserLayout from "@/layouts/user-layout";
 import AssetsPage from "@/pages/assets";
 import CanvasPage from "@/pages/canvas";
