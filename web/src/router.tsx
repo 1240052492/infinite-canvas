@@ -1,6 +1,8 @@
 import { createBrowserRouter, Outlet } from "react-router-dom";
 
 import { AnalyticsTracker } from "@/components/layout/analytics-tracker";
+import { AuthGuard } from "@/components/auth-guard";
+import { OAuthCallback } from "@/components/oauth-callback";
 import UserLayout from "@/layouts/user-layout";
 import AssetsPage from "@/pages/assets";
 import CanvasPage from "@/pages/canvas";
@@ -14,11 +16,17 @@ import VideoPage from "@/pages/video";
 
 export const router = createBrowserRouter([
     {
+        path: "/oauth/callback",
+        element: <OAuthCallback />,
+    },
+    {
         element: (
-            <UserLayout>
-                <AnalyticsTracker />
-                <Outlet />
-            </UserLayout>
+            <AuthGuard>
+                <UserLayout>
+                    <AnalyticsTracker />
+                    <Outlet />
+                </UserLayout>
+            </AuthGuard>
         ),
         children: [
             { path: "/", element: <HomePage /> },
