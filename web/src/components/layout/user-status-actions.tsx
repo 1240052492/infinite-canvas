@@ -1,12 +1,13 @@
 import type { CSSProperties } from "react";
 import { Tooltip } from "antd";
-import { BookOpen, Keyboard, Puzzle, Settings2 } from "lucide-react";
+import { BookOpen, Keyboard, Puzzle, Settings2, Home, Wallet, Key } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { AnimatedThemeToggler } from "@/components/ui/animated-theme-toggler";
 import { GitHubLink } from "@/components/layout/github-link";
 import { VersionReleaseModal } from "@/components/layout/version-release-modal";
 import { DOCS_URL } from "@/constant/env";
+import { NEW_API_LINKS } from "@/config/oauth";
 import { changeAppLocale, type AppLocale } from "@/i18n";
 import { cn } from "@/lib/utils";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -37,6 +38,15 @@ export function UserStatusActions({ showConfig = true, variant = "default", onOp
 
     return (
         <div className="inline-flex shrink-0 items-center gap-1">
+            <button type="button" className={naturalIconClass} style={iconStyle} onClick={() => window.location.href = NEW_API_LINKS.HOME} aria-label={t("userActions.home")} title={t("userActions.home")}>
+                <Home className="size-4" />
+            </button>
+            <button type="button" className={naturalIconClass} style={iconStyle} onClick={() => window.location.href = NEW_API_LINKS.WALLET} aria-label={t("userActions.wallet")} title={t("userActions.wallet")}>
+                <Wallet className="size-4" />
+            </button>
+            <button type="button" className={naturalIconClass} style={iconStyle} onClick={() => window.location.href = NEW_API_LINKS.KEYS} aria-label={t("userActions.keys")} title={t("userActions.keys")}>
+                <Key className="size-4" />
+            </button>
             {onOpenPlugins ? (
                 <button type="button" className={naturalIconClass} style={iconStyle} onClick={onOpenPlugins} aria-label={t("topNav.plugins")} title={t("topNav.plugins")}>
                     <Puzzle className="size-4" />
