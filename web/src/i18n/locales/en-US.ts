@@ -654,4 +654,12 @@ export default {
         zhCN: "简体中文",
         enUS: "English",
     },
+    auth: {
+        loggingIn: "Logging in...",
+        authFailed: "Authentication failed",
+        redirecting: "Redirecting to login...",
+        home: "Home",
+        wallet: "Wallet",
+        keys: "API Keys",
+    },
 };

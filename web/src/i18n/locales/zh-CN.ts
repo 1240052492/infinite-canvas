@@ -654,4 +654,12 @@ export default {
         zhCN: "简体中文",
         enUS: "English",
     },
+    auth: {
+        loggingIn: "登录中...",
+        authFailed: "认证失败",
+        redirecting: "跳转到登录页...",
+        home: "首页",
+        wallet: "钱包",
+        keys: "密钥管理",
+    },
 };
