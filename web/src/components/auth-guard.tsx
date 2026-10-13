@@ -7,10 +7,12 @@ interface AuthGuardProps {
 }
 
 export function AuthGuard({ children }: AuthGuardProps) {
-  const { accessToken, expiresAt, isAuthenticated } = useAuthStore();
+  const token = useAuthStore((state) => state.token);
+  const expiresAt = useAuthStore((state) => state.expiresAt);
+  const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
 
   useEffect(() => {
-    if (!accessToken || !expiresAt) {
+    if (!token || !expiresAt) {
       redirectToAuthorize();
       return;
     }
@@ -19,9 +21,9 @@ export function AuthGuard({ children }: AuthGuardProps) {
       redirectToAuthorize();
       return;
     }
-  }, [accessToken, expiresAt]);
+  }, [token, expiresAt]);
 
-  if (!isAuthenticated()) {
+  if (!isAuthenticated) {
     return null;
   }
 
