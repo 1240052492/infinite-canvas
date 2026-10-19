@@ -4,6 +4,7 @@ import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
+import { CHANNEL_BASE_URL_LOCKED, DEFAULT_CHANNEL_BASE_URL } from "@/constant/runtime-config";
 
 export type ApiCallFormat = "openai" | "gemini";
 export type ModelCapability = "image" | "video" | "text" | "audio";
@@ -74,19 +75,26 @@ export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
 const CHANNEL_MODEL_SEPARATOR = "::";
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
+
+/** Runtime-configured channel endpoint. When locked, every channel is forced onto this URL. */
+export const CHANNEL_FIXED_BASE_URL = DEFAULT_CHANNEL_BASE_URL;
+export const CHANNEL_BASE_URL_ENFORCED = CHANNEL_BASE_URL_LOCKED && Boolean(CHANNEL_FIXED_BASE_URL);
+
 export const LOCAL_PROXY_PACKAGE = "@basketikun/canvas-proxy";
 export const DEFAULT_LOCAL_PROXY_URL = "http://127.0.0.1:23210";
 
+const INITIAL_CHANNEL_BASE_URL = CHANNEL_FIXED_BASE_URL || OPENAI_BASE_URL;
+
 export const defaultConfig: AiConfig = {
     channelMode: "local",
-    baseUrl: OPENAI_BASE_URL,
+    baseUrl: INITIAL_CHANNEL_BASE_URL,
     apiKey: "",
     apiFormat: "openai",
     channels: [
         {
             id: "default",
             name: i18n.t("config.channels.defaultName"),
-            baseUrl: OPENAI_BASE_URL,
+            baseUrl: INITIAL_CHANNEL_BASE_URL,
             apiKey: "",
             apiFormat: "openai",
             models: [
@@ -254,6 +262,7 @@ export const useConfigStore = create<ConfigStore>()(
                         ...config,
                         channelMode: "local",
                         apiFormat: normalizeApiFormat(config.apiFormat),
+                        baseUrl: CHANNEL_BASE_URL_ENFORCED ? CHANNEL_FIXED_BASE_URL : config.baseUrl,
                         channels,
                         models,
                         imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
@@ -305,7 +314,7 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
     return {
         id: channel?.id?.trim() || nanoid(),
         name: channel?.name?.trim() || i18n.t("config.channels.newName"),
-        baseUrl: channel?.baseUrl?.trim() || defaultBaseUrlForApiFormat(apiFormat),
+        baseUrl: CHANNEL_BASE_URL_ENFORCED ? CHANNEL_FIXED_BASE_URL : channel?.baseUrl?.trim() || defaultBaseUrlForApiFormat(apiFormat),
         apiKey: channel?.apiKey || "",
         apiFormat,
         models: normalizeChannelModels(channel?.models),
@@ -316,11 +325,12 @@ export function upsertChannelCredentials(
     config: AiConfig,
     input: { baseUrl?: string | null; apiKey?: string | null },
 ): ChannelCredentialsImportResult & { config: AiConfig } {
-    const rawBaseUrl = input.baseUrl?.trim() || "";
+    const locked = CHANNEL_BASE_URL_ENFORCED;
+    const rawBaseUrl = locked ? CHANNEL_FIXED_BASE_URL : input.baseUrl?.trim() || "";
     if (!rawBaseUrl) return { status: "missing-base-url", config };
-    if (!isHttpBaseUrl(rawBaseUrl)) return { status: "invalid-base-url", config };
+    if (!locked && !isHttpBaseUrl(rawBaseUrl)) return { status: "invalid-base-url", config };
 
-    const baseUrl = normalizeImportedBaseUrl(rawBaseUrl);
+    const baseUrl = locked ? rawBaseUrl : normalizeImportedBaseUrl(rawBaseUrl);
     const apiKey = input.apiKey?.trim() || "";
     const matchingIndex = config.channels.findIndex((channel) => normalizedBaseUrlKey(channel.baseUrl) === normalizedBaseUrlKey(baseUrl));
 
@@ -335,7 +345,7 @@ export function upsertChannelCredentials(
     }
 
     const channel = createModelChannel({
-        name: importedChannelName(baseUrl),
+        name: locked ? i18n.t("config.channels.defaultName") : importedChannelName(baseUrl),
         baseUrl,
         apiKey,
         apiFormat: "openai",
@@ -461,6 +471,7 @@ function normalizeChannels(config: AiConfig) {
 }
 
 export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {
+    if (CHANNEL_BASE_URL_ENFORCED) return CHANNEL_FIXED_BASE_URL;
     if (apiFormat === "gemini") return GEMINI_BASE_URL;
     return OPENAI_BASE_URL;
 }

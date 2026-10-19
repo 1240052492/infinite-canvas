@@ -7,6 +7,7 @@ import { AnimatedThemeToggler } from "@/components/ui/animated-theme-toggler";
 import { GitHubLink } from "@/components/layout/github-link";
 import { VersionReleaseModal } from "@/components/layout/version-release-modal";
 import { DOCS_URL } from "@/constant/env";
+import { TOP_NAV_HIDDEN_ITEMS } from "@/constant/runtime-config";
 import { NEW_API_LINKS } from "@/config/oauth";
 import { changeAppLocale, type AppLocale } from "@/i18n";
 import { cn } from "@/lib/utils";
@@ -35,26 +36,35 @@ export function UserStatusActions({ showConfig = true, variant = "default", onOp
     const locale = i18n.resolvedLanguage as AppLocale;
     const nextLocale = locale === "zh-CN" ? "en-US" : "zh-CN";
     const languageLabel = t("topNav.switchLanguage", { language: t(nextLocale === "zh-CN" ? "locale.zhCN" : "locale.enUS") });
+    const hidden = (item: string) => TOP_NAV_HIDDEN_ITEMS.has(item);
 
     return (
         <div className="inline-flex shrink-0 items-center gap-1">
-            <button type="button" className={naturalIconClass} style={iconStyle} onClick={() => window.location.href = NEW_API_LINKS.HOME} aria-label={t("userActions.home")} title={t("userActions.home")}>
-                <Home className="size-4" />
-            </button>
-            <button type="button" className={naturalIconClass} style={iconStyle} onClick={() => window.location.href = NEW_API_LINKS.WALLET} aria-label={t("userActions.wallet")} title={t("userActions.wallet")}>
-                <Wallet className="size-4" />
-            </button>
-            <button type="button" className={naturalIconClass} style={iconStyle} onClick={() => window.location.href = NEW_API_LINKS.KEYS} aria-label={t("userActions.keys")} title={t("userActions.keys")}>
-                <Key className="size-4" />
-            </button>
+            {!hidden("home") ? (
+                <button type="button" className={naturalIconClass} style={iconStyle} onClick={() => window.location.href = NEW_API_LINKS.home} aria-label={t("userActions.home")} title={t("userActions.home")}>
+                    <Home className="size-4" />
+                </button>
+            ) : null}
+            {!hidden("wallet") ? (
+                <button type="button" className={naturalIconClass} style={iconStyle} onClick={() => window.location.href = NEW_API_LINKS.wallet} aria-label={t("userActions.wallet")} title={t("userActions.wallet")}>
+                    <Wallet className="size-4" />
+                </button>
+            ) : null}
+            {!hidden("keys") ? (
+                <button type="button" className={naturalIconClass} style={iconStyle} onClick={() => window.location.href = NEW_API_LINKS.keys} aria-label={t("userActions.keys")} title={t("userActions.keys")}>
+                    <Key className="size-4" />
+                </button>
+            ) : null}
             {onOpenPlugins ? (
                 <button type="button" className={naturalIconClass} style={iconStyle} onClick={onOpenPlugins} aria-label={t("topNav.plugins")} title={t("topNav.plugins")}>
                     <Puzzle className="size-4" />
                 </button>
             ) : null}
-            <a href={DOCS_URL} target="_blank" rel="noopener noreferrer" className={naturalIconClass} style={iconStyle} aria-label={t("topNav.docs")} title={t("topNav.docs")}>
-                <BookOpen className="size-4" />
-            </a>
+            {!hidden("docs") ? (
+                <a href={DOCS_URL} target="_blank" rel="noopener noreferrer" className={naturalIconClass} style={iconStyle} aria-label={t("topNav.docs")} title={t("topNav.docs")}>
+                    <BookOpen className="size-4" />
+                </a>
+            ) : null}
             {showConfig ? (
                 <button type="button" className={naturalIconClass} style={iconStyle} onClick={() => openConfigDialog(false)} aria-label={t("navigation.config")} title={t("navigation.config")}>
                     <Settings2 className="size-4" />
@@ -67,7 +77,7 @@ export function UserStatusActions({ showConfig = true, variant = "default", onOp
             </Tooltip>
             <AnimatedThemeToggler theme={theme} onThemeChange={setTheme} className={naturalIconClass} style={iconStyle} aria-label={t(theme === "dark" ? "topNav.lightTheme" : "topNav.darkTheme")} title={t(theme === "dark" ? "topNav.lightTheme" : "topNav.darkTheme")} />
             <VersionReleaseModal style={versionStyle} />
-            <GitHubLink className={cn("bg-transparent hover:bg-transparent dark:hover:bg-transparent", gitHubClassName)} style={gitHubStyle} />
+            {!hidden("github") ? <GitHubLink className={cn("bg-transparent hover:bg-transparent dark:hover:bg-transparent", gitHubClassName)} style={gitHubStyle} /> : null}
             {onOpenShortcuts ? (
                 <button type="button" className={naturalIconClass} style={iconStyle} onClick={onOpenShortcuts} aria-label={t("topNav.shortcuts")} title={t("topNav.shortcuts")}>
                     <Keyboard className="size-4" />

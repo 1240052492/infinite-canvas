@@ -11,12 +11,30 @@ sanitize_id() {
     printf '%s' "$1" | tr -cd 'A-Za-z0-9-'
 }
 
+# URLs may contain "://", keep them intact but strip quotes/backslashes so they cannot break out of the JS string.
+sanitize_url() {
+    printf '%s' "$1" | tr -d '"\\'
+}
+
+# Top-nav hidden list only accepts letters and commas.
+sanitize_hidden() {
+    printf '%s' "$1" | tr -cd 'A-Za-z,'
+}
+
 GA4_ID=$(sanitize_id "${ANALYTICS_GA4_ID:-}")
 BAIDU_ID=$(sanitize_id "${ANALYTICS_BAIDU_ID:-}")
+NEW_API_BASE_URL=$(sanitize_url "${NEW_API_BASE_URL:-}")
+TOP_NAV_HIDDEN=$(sanitize_hidden "${TOP_NAV_HIDDEN:-}")
+DEFAULT_CHANNEL_BASE_URL=$(sanitize_url "${DEFAULT_CHANNEL_BASE_URL:-}")
+LOCK_CHANNEL_BASE_URL=$(printf '%s' "${LOCK_CHANNEL_BASE_URL:-}" | tr -cd 'truefals')
 
 cat > /usr/share/nginx/html/config.js <<EOF
 window.__RUNTIME_CONFIG__ = {
   ANALYTICS_GA4_ID: "${GA4_ID}",
-  ANALYTICS_BAIDU_ID: "${BAIDU_ID}"
+  ANALYTICS_BAIDU_ID: "${BAIDU_ID}",
+  NEW_API_BASE_URL: "${NEW_API_BASE_URL}",
+  TOP_NAV_HIDDEN: "${TOP_NAV_HIDDEN}",
+  DEFAULT_CHANNEL_BASE_URL: "${DEFAULT_CHANNEL_BASE_URL}",
+  LOCK_CHANNEL_BASE_URL: "${LOCK_CHANNEL_BASE_URL}"
 };
 EOF

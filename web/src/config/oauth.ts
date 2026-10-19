@@ -1,3 +1,5 @@
+import { NEW_API_BASE_URL } from '@/constant/runtime-config';
+
 /**
  * OAuth 2.0 配置
  */
@@ -12,11 +14,21 @@ export const OAUTH_CONFIG = {
 
 /**
  * New-API 链接配置
+ * 运行时 NEW_API_BASE_URL（config.js / 环境变量）优先；支持相对路径（如 "/" 生成 "/wallet"）。
  */
+const runtimeBase = NEW_API_BASE_URL || import.meta.env.VITE_NEW_API_BASE_URL || '';
+const base = runtimeBase ? runtimeBase.replace(/\/+$/, '') : 'https://www.aiplantform.site';
+
 export const NEW_API_LINKS = {
-  home: import.meta.env.VITE_NEW_API_HOME || 'https://www.aiplantform.site',
-  wallet: import.meta.env.VITE_NEW_API_WALLET || 'https://www.aiplantform.site/wallet',
-  keys: import.meta.env.VITE_NEW_API_KEYS || 'https://www.aiplantform.site/keys',
+  home: NEW_API_BASE_URL
+    ? base
+    : import.meta.env.VITE_NEW_API_HOME || base,
+  wallet: NEW_API_BASE_URL
+    ? `${base}/wallet`
+    : import.meta.env.VITE_NEW_API_WALLET || `${base}/wallet`,
+  keys: NEW_API_BASE_URL
+    ? `${base}/keys`
+    : import.meta.env.VITE_NEW_API_KEYS || `${base}/keys`,
 };
 
 /**
