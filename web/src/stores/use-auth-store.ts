@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
 import type { AuthState } from '../types/auth';
 import { isTokenExpired } from '../services/oauth';
 
@@ -10,7 +9,6 @@ interface AuthStore extends AuthState {
 }
 
 export const useAuthStore = create<AuthStore>()(
-  persist(
     (set, get) => ({
       token: null,
       isAuthenticated: false,
@@ -42,13 +40,5 @@ export const useAuthStore = create<AuthStore>()(
           clearToken();
         }
       },
-    }),
-    {
-      name: 'auth-storage',
-      partialize: (state) => ({
-        token: state.token,
-        expiresAt: state.expiresAt,
-      }),
-    }
-  )
+    })
 );

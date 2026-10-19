@@ -13,12 +13,12 @@ export function AuthGuard({ children }: AuthGuardProps) {
 
   useEffect(() => {
     if (!token || !expiresAt) {
-      redirectToAuthorize();
+      void redirectToAuthorize();
       return;
     }
 
     if (isTokenExpired(expiresAt)) {
-      redirectToAuthorize();
+      void redirectToAuthorize();
       return;
     }
   }, [token, expiresAt]);
