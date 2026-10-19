@@ -9,7 +9,7 @@ type RuntimeConfig = {
     ANALYTICS_GA4_ID?: string; // GA4 measurement ID (G-XXXX)
     ANALYTICS_BAIDU_ID?: string; // Baidu Analytics site ID
     NEW_API_BASE_URL?: string; // Base URL for the top-bar Home/Wallet/Keys links; supports relative paths (e.g. "/")
-    TOP_NAV_HIDDEN?: string; // Comma-separated top-bar entries to hide: home,wallet,keys,docs,github
+    TOP_NAV_HIDDEN?: string; // Comma-separated top-bar entries to hide: home,wallet,keys,plugins,docs,github
     DEFAULT_CHANNEL_BASE_URL?: string; // Default (and, when locked, mandatory) channel endpoint URL
     LOCK_CHANNEL_BASE_URL?: string; // "true" forces every channel to DEFAULT_CHANNEL_BASE_URL and disables editing
 };

@@ -1,4 +1,4 @@
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, Send } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { App, Button, Image, Tag } from "antd";
 import { useNavigate } from "react-router-dom";
@@ -27,6 +27,7 @@ export default function IndexPage() {
     const { t } = useTranslation();
     const navigate = useNavigate();
     const [primaryTool] = navigationTools;
+    const COMMUNITY_URL = "https://t.me/zsxqapi";
     const [promptShowcase, setPromptShowcase] = useState<Prompt[]>([]);
     const [previewIndex, setPreviewIndex] = useState(0);
     const [previewOpen, setPreviewOpen] = useState(false);
@@ -54,6 +55,9 @@ export default function IndexPage() {
                         </Button>
                         <Button size="large" onClick={() => navigate("/canvas")}>
                             {t("home.openCanvas")}
+                        </Button>
+                        <Button size="large" onClick={() => window.open(COMMUNITY_URL, "_blank", "noopener,noreferrer")} icon={<Send className="size-4" />}>
+                            {t("home.community")}
                         </Button>
                     </div>
                 </div>

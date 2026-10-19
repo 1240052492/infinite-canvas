@@ -80,6 +80,20 @@ const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 export const CHANNEL_FIXED_BASE_URL = DEFAULT_CHANNEL_BASE_URL;
 export const CHANNEL_BASE_URL_ENFORCED = CHANNEL_BASE_URL_LOCKED && Boolean(CHANNEL_FIXED_BASE_URL);
 
+/** Derive a display name from a base URL host, e.g. https://88api.ai -> "88API", https://api.foo.com -> "foo". */
+export function deriveChannelNameFromBaseUrl(baseUrl: string) {
+    try {
+        const host = new URL(baseUrl).hostname.replace(/^(?:www|api)\./i, "");
+        const label = host.split(".")[0] || host;
+        return label.replace(/[a-zA-Z]+/g, (part) => part.toUpperCase());
+    } catch {
+        return "";
+    }
+}
+
+/** Auto channel name while the endpoint is locked, derived from the locked base URL host. */
+export const CHANNEL_FIXED_NAME = CHANNEL_BASE_URL_ENFORCED ? deriveChannelNameFromBaseUrl(CHANNEL_FIXED_BASE_URL) : "";
+
 export const LOCAL_PROXY_PACKAGE = "@basketikun/canvas-proxy";
 export const DEFAULT_LOCAL_PROXY_URL = "http://127.0.0.1:23210";
 
@@ -313,7 +327,7 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
     const apiFormat = normalizeApiFormat(channel?.apiFormat);
     return {
         id: channel?.id?.trim() || nanoid(),
-        name: channel?.name?.trim() || i18n.t("config.channels.newName"),
+        name: channel?.name?.trim() || (CHANNEL_BASE_URL_ENFORCED ? CHANNEL_FIXED_NAME || i18n.t("config.channels.newName") : i18n.t("config.channels.newName")),
         baseUrl: CHANNEL_BASE_URL_ENFORCED ? CHANNEL_FIXED_BASE_URL : channel?.baseUrl?.trim() || defaultBaseUrlForApiFormat(apiFormat),
         apiKey: channel?.apiKey || "",
         apiFormat,
@@ -345,7 +359,7 @@ export function upsertChannelCredentials(
     }
 
     const channel = createModelChannel({
-        name: locked ? i18n.t("config.channels.defaultName") : importedChannelName(baseUrl),
+        name: locked ? CHANNEL_FIXED_NAME || i18n.t("config.channels.defaultName") : importedChannelName(baseUrl),
         baseUrl,
         apiKey,
         apiFormat: "openai",

@@ -55,7 +55,7 @@ export function UserStatusActions({ showConfig = true, variant = "default", onOp
                     <Key className="size-4" />
                 </button>
             ) : null}
-            {onOpenPlugins ? (
+            {onOpenPlugins && !hidden("plugins") ? (
                 <button type="button" className={naturalIconClass} style={iconStyle} onClick={onOpenPlugins} aria-label={t("topNav.plugins")} title={t("topNav.plugins")}>
                     <Puzzle className="size-4" />
                 </button>

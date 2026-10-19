@@ -3,7 +3,7 @@ import localforage from "localforage";
 import { runPromptSource, type RawPrompt } from "./prompt-source-runtime";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
 import i18n from "@/i18n";
-import type { PromptSource } from "./prompt-source-presets";
+import { sourceMatchesKind, type PromptSource, type PromptSourceKind } from "./prompt-source-presets";
 
 export type Prompt = RawPrompt & {
     sourceId: string;
@@ -49,8 +49,8 @@ const cacheTtlMs = 1000 * 60 * 60;
 const promptCacheStore = localforage.createInstance({ name: "infinite-canvas", storeName: "prompt_cache" });
 const loadingSources = new Map<string, Promise<PromptSourceRefreshResult>>();
 
-function enabledSources() {
-    return usePromptSourceStore.getState().sources.filter((source) => source.enabled);
+function enabledSources(kind?: PromptSourceKind) {
+    return usePromptSourceStore.getState().sources.filter((source) => source.enabled && sourceMatchesKind(source, kind));
 }
 
 function cacheKey(sourceId: string) {
@@ -123,9 +123,9 @@ async function getSourcePrompts(source: PromptSource): Promise<Prompt[]> {
     return (await readSourceCache(source.id))?.items || [];
 }
 
-async function getAllPrompts(): Promise<Prompt[]> {
+async function getAllPrompts(kind?: PromptSourceKind): Promise<Prompt[]> {
     const settled = await Promise.all(
-        enabledSources().map(async (source) => {
+        enabledSources(kind).map(async (source) => {
             try {
                 return await getSourcePrompts(source);
             } catch {
@@ -136,14 +136,14 @@ async function getAllPrompts(): Promise<Prompt[]> {
     return settled.flat();
 }
 
-export async function fetchPrompts({ keyword = "", tag = [], category = ALL_PROMPTS_OPTION, page = 1, pageSize = 20 }: { keyword?: string; tag?: string[]; category?: string; page?: number; pageSize?: number } = {}) {
-    const items = await getAllPrompts();
+export async function fetchPrompts({ keyword = "", tag = [], category = ALL_PROMPTS_OPTION, kind, page = 1, pageSize = 20 }: { keyword?: string; tag?: string[]; category?: string; kind?: PromptSourceKind; page?: number; pageSize?: number } = {}) {
+    const items = await getAllPrompts(kind);
     const normalizedKeyword = keyword.trim().toLowerCase();
     const normalizedPage = Math.max(1, page);
     const normalizedPageSize = Math.max(1, Math.min(100, pageSize));
     const withoutTagFilter = filterPrompts(items, { keyword: normalizedKeyword, category, tags: [] });
     const filtered = filterPrompts(items, { keyword: normalizedKeyword, category, tags: tag });
-    const categories = enabledSources().map((source) => source.name);
+    const categories = enabledSources(kind).map((source) => source.name);
 
     return {
         items: filtered.slice((normalizedPage - 1) * normalizedPageSize, normalizedPage * normalizedPageSize),

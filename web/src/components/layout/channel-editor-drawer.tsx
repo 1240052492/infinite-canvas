@@ -3,7 +3,7 @@ import { ListPlus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { CHANNEL_BASE_URL_ENFORCED, CHANNEL_FIXED_BASE_URL, defaultBaseUrlForApiFormat, guessCapability, normalizeChannelModels, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { CHANNEL_BASE_URL_ENFORCED, CHANNEL_FIXED_BASE_URL, CHANNEL_FIXED_NAME, defaultBaseUrlForApiFormat, guessCapability, normalizeChannelModels, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 import { ModelScriptEditor } from "./model-script-editor";
 import { ModelSelectModal } from "./model-select-modal";
 
@@ -49,7 +49,7 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
 
     const save = () => {
         const baseUrl = CHANNEL_BASE_URL_ENFORCED ? CHANNEL_FIXED_BASE_URL : draft.baseUrl;
-        onSave({ ...draft, baseUrl, name: draft.name.trim() || t("config.channels.unnamed"), models: normalizeChannelModels(draft.models) });
+        onSave({ ...draft, baseUrl, name: draft.name.trim() || (CHANNEL_BASE_URL_ENFORCED ? CHANNEL_FIXED_NAME : t("config.channels.unnamed")), models: normalizeChannelModels(draft.models) });
         onClose();
     };
 
@@ -72,11 +72,15 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
             <div className="grid gap-4 md:grid-cols-2">
                 <label className="block">
                     <span className="mb-1 block text-sm font-medium">{t("config.channelEditor.name")}</span>
-                    <Input value={draft.name} onChange={(event) => patch({ name: event.target.value })} />
+                    <Input
+                        value={draft.name}
+                        onChange={(event) => patch({ name: event.target.value })}
+                        placeholder={CHANNEL_BASE_URL_ENFORCED ? CHANNEL_FIXED_NAME : t("config.channels.unnamed")}
+                    />
                 </label>
                 <label className="block">
                     <span className="mb-1 block text-sm font-medium">{t("config.channelEditor.protocol")}</span>
-                    <Select className="w-full" value={draft.apiFormat} options={apiFormatOptions} onChange={changeApiFormat} />
+                    <Select className="w-full" value={draft.apiFormat} options={apiFormatOptions} onChange={changeApiFormat} disabled={CHANNEL_BASE_URL_ENFORCED} />
                 </label>
                 <label className="block md:col-span-2">
                     <span className="mb-1 block text-sm font-medium">{t("config.channelEditor.baseUrl")}</span>

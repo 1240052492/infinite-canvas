@@ -10,17 +10,31 @@ import { useCopyText } from "@/hooks/use-copy-text";
 import { cn } from "@/lib/utils";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { ALL_PROMPTS_OPTION, type Prompt } from "@/services/api/prompts";
+import type { PromptSourceKind } from "@/services/api/prompt-source-presets";
+
+const PROMPT_TABS: Array<{ key: PromptSourceKind; labelKey: string }> = [
+    { key: "image", labelKey: "prompts.tabImage" },
+    { key: "video", labelKey: "prompts.tabVideo" },
+];
 
 export default function PromptsPage() {
     const { message } = App.useApp();
     const { t } = useTranslation();
+    const [activeKind, setActiveKind] = useState<PromptSourceKind>("image");
     const [titleKeyword, setTitleKeyword] = useState("");
     const [selectedTags, setSelectedTags] = useState<string[]>([]);
     const [selectedCategory, setSelectedCategory] = useState(ALL_PROMPTS_OPTION);
     const [selectedPrompt, setSelectedPrompt] = useState<Prompt | null>(null);
     const addAsset = useAssetStore((state) => state.addAsset);
     const copyText = useCopyText();
-    const { query, items: promptItems, tags: promptTags, categories: promptCategoryOptions, total: totalPrompts } = usePromptList({ keyword: titleKeyword, tags: selectedTags, category: selectedCategory });
+    const { query, items: promptItems, tags: promptTags, categories: promptCategoryOptions, total: totalPrompts } = usePromptList({ keyword: titleKeyword, tags: selectedTags, category: selectedCategory, kind: activeKind });
+
+    const switchKind = (kind: PromptSourceKind) => {
+        if (kind === activeKind) return;
+        setActiveKind(kind);
+        setSelectedCategory(ALL_PROMPTS_OPTION);
+        setSelectedTags([]);
+    };
 
     useEffect(() => {
         if (query.isError) message.error(query.error instanceof Error ? query.error.message : t("prompts.loadFailed"));
@@ -48,6 +62,23 @@ export default function PromptsPage() {
                     <div className="text-center">
                         <h1 className="text-2xl font-semibold text-stone-950 dark:text-stone-100">{t("prompts.title")}</h1>
                         <p className="mt-1 text-sm text-stone-500 dark:text-stone-400">{t("prompts.total", { count: totalPrompts })}</p>
+                        <div className="mt-4 inline-flex items-center gap-2">
+                            {PROMPT_TABS.map((tab) => (
+                                <button
+                                    key={tab.key}
+                                    type="button"
+                                    onClick={() => switchKind(tab.key)}
+                                    className={cn(
+                                        "rounded-full px-5 py-1.5 text-sm font-medium transition-colors",
+                                        activeKind === tab.key
+                                            ? "bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900"
+                                            : "bg-stone-100 text-stone-600 hover:bg-stone-200 dark:bg-stone-800 dark:text-stone-300 dark:hover:bg-stone-700",
+                                    )}
+                                >
+                                    {t(tab.labelKey)}
+                                </button>
+                            ))}
+                        </div>
                     </div>
                     <div className="mt-5 grid items-start gap-5 lg:grid-cols-[240px_minmax(0,1fr)] lg:gap-6">
                         <aside className="thin-scrollbar max-h-72 overflow-y-auto border-b border-stone-200 pb-5 lg:sticky lg:top-0 lg:max-h-[calc(100dvh-6rem)] lg:border-b-0 lg:border-r lg:pb-8 lg:pr-5 dark:border-stone-800">

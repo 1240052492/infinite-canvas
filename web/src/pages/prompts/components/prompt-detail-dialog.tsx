@@ -4,6 +4,12 @@ import { useTranslation } from "react-i18next";
 
 import { formatPromptDate, type Prompt } from "@/services/api/prompts";
 
+const VIDEO_URL_PATTERN = /^https?:\/\/\S+\.(?:mp4|webm|mov|m3u8)(?:\?\S*)?$/i;
+
+function isVideoUrl(url: string) {
+    return VIDEO_URL_PATTERN.test(url.trim());
+}
+
 export function PromptDetailDialog({ prompt, onClose, onCopy, onSaveAsset }: { prompt: Prompt | null; onClose: () => void; onCopy: (prompt: string) => void; onSaveAsset?: (prompt: Prompt) => void }) {
     const { i18n, t } = useTranslation();
 
@@ -24,7 +30,13 @@ export function PromptDetailDialog({ prompt, onClose, onCopy, onSaveAsset }: { p
                             ))}
                         </div>
                         {prompt.description ? <p className="mt-4 text-sm leading-6 text-stone-500 dark:text-stone-400">{prompt.description}</p> : null}
-                        {prompt.preview ? <pre className="mt-4 whitespace-pre-wrap rounded-lg bg-stone-100 p-3 text-xs leading-5 text-stone-600 dark:bg-stone-900 dark:text-stone-300">{prompt.preview}</pre> : null}
+                        {prompt.preview ? (
+                            isVideoUrl(prompt.preview) ? (
+                                <video src={prompt.preview} controls preload="metadata" playsInline muted className="mt-4 max-h-80 w-full rounded-lg bg-black" />
+                            ) : (
+                                <pre className="mt-4 whitespace-pre-wrap rounded-lg bg-stone-100 p-3 text-xs leading-5 text-stone-600 dark:bg-stone-900 dark:text-stone-300">{prompt.preview}</pre>
+                            )
+                        ) : null}
                         <p className="mt-4 whitespace-pre-wrap text-sm leading-7 text-stone-800 dark:text-stone-300">{prompt.prompt}</p>
                         {prompt.createdAt || prompt.updatedAt ? <div className="mt-4 text-xs text-stone-500 dark:text-stone-400">{prompt.createdAt ? t("common.created", { date: formatPromptDate(prompt.createdAt, i18n.resolvedLanguage) }) : null}{prompt.createdAt && prompt.updatedAt ? " · " : null}{prompt.updatedAt ? t("common.updated", { date: formatPromptDate(prompt.updatedAt, i18n.resolvedLanguage) }) : null}</div> : null}
                     </div>

@@ -1,6 +1,9 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+/* antd reset must live inside a cascade layer: unlayered, its `button { color: inherit }`
+   would override every Tailwind utility text color (e.g. text-white) on raw <button> elements. */
+@import "antd/dist/reset.css" layer(base);
 @source "../../../node_modules/streamdown/dist/*.js";
 
 @custom-variant dark (&:is(.dark *));
