@@ -15,3 +15,9 @@ web/public/plugins
 plugins/canvas/*/dist
 plugins/canvas/*/node_modules
 web/public/plugins
+# AI agent local working directories
+.workbuddy/
+.claude/
+.codex/
+.cursor/
+.claude.json
