@@ -1,47 +1,119 @@
+import axios from "axios";
 import { Check, Lock, RefreshCw, Save, Scaling, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { Button, Checkbox, Modal } from "antd";
+import { Button, Modal } from "antd";
 import { useTranslation } from "react-i18next";
-import { useNavigate } from "react-router-dom";
 
-import { cn } from "@/lib/utils";
+import { OAUTH_CONFIG } from "@/constants/oauth-config";
+import { checkPlatformSession, ensureAuthenticated, startSilentSso } from "@/services/auth-gate";
+import { isTokenExpired } from "@/services/oauth";
+import { useAuthStore } from "@/stores/use-auth-store";
 
-const ACK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// Server-side frequency control for logged-in users (per account, survives
+// browser resets). Guests always see the guide with a login prompt; admins
+// never do. When the status endpoint is unreachable the local record below
+// keeps the dialog from nagging on every entry.
+const LOCAL_ACK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const DAY_SECONDS = 24 * 60 * 60;
+
+const guideApiOrigin = new URL(OAUTH_CONFIG.tokenUrl).origin;
 
 function ackStorageKey(platform: "image" | "video") {
     return `canvas.creationGuideAck.${platform}`;
 }
 
-function hasRecentAck(platform: "image" | "video") {
+function hasRecentLocalAck(platform: "image" | "video") {
     try {
         const raw = localStorage.getItem(ackStorageKey(platform));
         if (!raw) return false;
         const acknowledgedAt = Number(raw);
-        return Number.isFinite(acknowledgedAt) && Date.now() - acknowledgedAt < ACK_TTL_MS;
+        return Number.isFinite(acknowledgedAt) && Date.now() - acknowledgedAt < LOCAL_ACK_TTL_MS;
     } catch {
         return false;
     }
 }
 
+function recordLocalAck(platform: "image" | "video") {
+    try {
+        localStorage.setItem(ackStorageKey(platform), String(Date.now()));
+    } catch {
+        /* storage unavailable; ignore */
+    }
+}
+
 type GuideItem = { icon: React.ReactNode; titleKey: string; descKey: string };
+
+type ServerGuideStatus = { reminder_days?: number; acked_at?: Record<string, number> };
 
 export function CreationGuideModal({ platform }: { platform: "image" | "video" }) {
     const { t } = useTranslation();
-    const navigate = useNavigate();
     const [open, setOpen] = useState(false);
-    const [remindLater, setRemindLater] = useState(false);
+    // Reactive auth state: the footer buttons must follow the logged-in
+    // status, otherwise a returning user would still see the login prompt.
+    const authed = useAuthStore((state) => Boolean(state.token && state.expiresAt && !isTokenExpired(state.expiresAt)));
 
     useEffect(() => {
-        if (!hasRecentAck(platform)) setOpen(true);
-    }, [platform]);
+        let cancelled = false;
+        if (useAuthStore.getState().isAdmin()) return;
 
-    const acknowledge = () => {
-        if (remindLater) {
+        if (!authed) {
+            // Guests: only show the login prompt once we know there is no
+            // platform session. A visitor logged in to the New API console
+            // is signed in silently instead, so the dialog never asks them
+            // to log in twice.
+            void checkPlatformSession().then((session) => {
+                if (cancelled) return;
+                if (session.authenticated) {
+                    startSilentSso();
+                    return;
+                }
+                setOpen(true);
+            });
+            return () => {
+                cancelled = true;
+            };
+        }
+
+        const decideByAccount = async () => {
+            const token = useAuthStore.getState().token;
             try {
-                localStorage.setItem(ackStorageKey(platform), String(Date.now()));
+                const response = await axios.get<ServerGuideStatus>(`${guideApiOrigin}/api/creation-guide/status`, {
+                    headers: { Authorization: `Bearer ${token}` },
+                });
+                if (cancelled) return;
+                const reminderDays = response.data.reminder_days ?? 7;
+                const ackedAt = response.data.acked_at?.[platform];
+                if (ackedAt && Date.now() / 1000 - ackedAt < reminderDays * DAY_SECONDS) return;
+                setOpen(true);
             } catch {
-                /* storage unavailable; ignore */
+                if (cancelled) return;
+                if (!hasRecentLocalAck(platform)) setOpen(true);
             }
+        };
+        void decideByAccount();
+        return () => {
+            cancelled = true;
+        };
+    }, [platform, authed]);
+
+    // Explicit confirmation records the acknowledgement for the account
+    // (server) and this browser (fallback). Guests are not recorded: the
+    // agreed strategy shows them the guide on every workbench entry, with a
+    // login button next to the confirmation. Closing without confirming
+    // does not record either, so the guide shows again on the next entry.
+    const acknowledge = () => {
+        const { token } = useAuthStore.getState();
+        if (authed && token) {
+            void axios
+                .post(
+                    `${guideApiOrigin}/api/creation-guide/ack`,
+                    { platform },
+                    { headers: { Authorization: `Bearer ${token}` } },
+                )
+                .catch(() => {
+                    /* server unavailable; the local record below still applies */
+                });
+            recordLocalAck(platform);
         }
         setOpen(false);
     };
@@ -59,7 +131,7 @@ export function CreationGuideModal({ platform }: { platform: "image" | "video" }
     return (
         <Modal
             open={open}
-            onCancel={acknowledge}
+            onCancel={() => setOpen(false)}
             width={680}
             footer={null}
             title={
@@ -97,14 +169,11 @@ export function CreationGuideModal({ platform }: { platform: "image" | "video" }
                 <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs leading-5 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">{t("guide.videoNotice")}</div>
             ) : null}
             <p className="mt-4 text-xs leading-5 text-stone-400 dark:text-stone-500">{t("guide.footerNote")}</p>
-            <div className="mt-4 flex items-center justify-between gap-3">
-                <Checkbox checked={remindLater} onChange={(event) => setRemindLater(event.target.checked)}>
-                    <span className="text-xs text-stone-500 dark:text-stone-400">{t("guide.remind7d")}</span>
-                </Checkbox>
-                <div className={cn("flex items-center gap-2")}>
-                    <Button onClick={() => { setOpen(false); navigate("/", { replace: true }); }}>{t("guide.later")}</Button>
-                    <Button type="primary" onClick={acknowledge}>{t("guide.confirm")}</Button>
-                </div>
+            <div className="mt-4 flex items-center justify-end gap-2">
+                {!authed ? (
+                    <Button onClick={() => { ensureAuthenticated(); }}>{t("guide.login")}</Button>
+                ) : null}
+                <Button type="primary" onClick={acknowledge}>{t("guide.confirm")}</Button>
             </div>
         </Modal>
     );

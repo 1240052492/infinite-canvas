@@ -7,14 +7,45 @@ const CODE_VERIFIER_KEY = 'oauth_code_verifier';
 
 const NEW_API_ORIGIN = new URL(OAUTH_CONFIG.tokenUrl).origin;
 
+const CLIENT_ID_CACHE_KEY = 'canvas.oauth.client_id';
+const CLIENT_ID_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+
 let cachedClientId: string | null = null;
 let clientIdRequest: Promise<string> | null = null;
+
+// Persist the discovered client_id for the tab session. Every full page load
+// would otherwise hit the discovery endpoint again, and that endpoint shares
+// a rate-limit bucket with the rest of the sign-in flow, so routine reloads
+// used to crowd out real requests.
+function readPersistedClientId(): string | null {
+  try {
+    const raw = sessionStorage.getItem(CLIENT_ID_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { id?: string; at?: number };
+    if (!parsed?.id || typeof parsed.at !== 'number') return null;
+    if (Date.now() - parsed.at > CLIENT_ID_CACHE_TTL_MS) return null;
+    return parsed.id;
+  } catch {
+    return null;
+  }
+}
+
+function persistClientId(clientId: string): void {
+  try {
+    sessionStorage.setItem(CLIENT_ID_CACHE_KEY, JSON.stringify({ id: clientId, at: Date.now() }));
+  } catch {
+    // Private mode or a full quota: discovery still works without the cache.
+  }
+}
 
 // Resolve the client_id at runtime from the New API console, so a new OAuth
 // application created there takes effect on the next page load without
 // editing .env.local or restarting the dev server. The build-time
 // VITE_OAUTH_CLIENT_ID stays as a fallback when discovery is unavailable.
 async function resolveClientId(): Promise<string> {
+  if (cachedClientId) return cachedClientId;
+
+  cachedClientId = readPersistedClientId();
   if (cachedClientId) return cachedClientId;
 
   clientIdRequest ??= axios
@@ -25,6 +56,7 @@ async function resolveClientId(): Promise<string> {
       const clientId = response.data?.client_id;
       if (!clientId) throw new Error('client config response missing client_id');
       cachedClientId = clientId;
+      persistClientId(clientId);
       return clientId;
     })
     .catch((error) => {
@@ -36,11 +68,16 @@ async function resolveClientId(): Promise<string> {
   return clientIdRequest;
 }
 
-// Test fixture: clears the memoized discovery result so each test starts from
-// a cold cache.
+// Test fixture: clears the memoized discovery result, including the persisted
+// copy, so each test starts from a cold cache.
 export function resetResolvedClientId(): void {
   cachedClientId = null;
   clientIdRequest = null;
+  try {
+    sessionStorage.removeItem(CLIENT_ID_CACHE_KEY);
+  } catch {
+    // Nothing to clear.
+  }
 }
 
 export function createOAuthCallbackGuard(): () => boolean {

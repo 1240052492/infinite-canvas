@@ -7,9 +7,11 @@ import { navigationTools, type NavigationToolSlug } from "@/constant/navigation-
 import { AppConfigModal } from "@/components/layout/app-config-modal";
 import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
 import { UserStatusActions } from "@/components/layout/user-status-actions";
+import { checkPlatformSession, startSilentSso } from "@/services/auth-gate";
 import { cn } from "@/lib/utils";
 import { useEffect, useRef, useState } from "react";
 import { useAgentStore } from "@/stores/use-agent-store";
+import { useAuthStore } from "@/stores/use-auth-store";
 
 export function AppTopNav() {
     const { t } = useTranslation();
@@ -31,6 +33,23 @@ export function AppTopNav() {
         autoConnectRef.current = true;
         connectAgent({ silent: true });
     }, [agentConnected, agentEnabled, agentToken, connectAgent]);
+
+    // Silent SSO: a visitor already logged in to the New API console is
+    // signed in to Canvas automatically (the authorize step auto-approves
+    // with the live session), so the app never shows a login prompt to
+    // someone the platform already knows.
+    const canvasLoggedIn = useAuthStore((state) => Boolean(state.token && state.expiresAt));
+    useEffect(() => {
+        if (canvasLoggedIn) return;
+        let cancelled = false;
+        void checkPlatformSession().then((session) => {
+            if (cancelled || !session.authenticated) return;
+            startSilentSso();
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [canvasLoggedIn]);
 
     return (
         <>

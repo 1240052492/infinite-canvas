@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 import { Tooltip } from "antd";
-import { BookOpen, Keyboard, Puzzle, Settings2, Home, Wallet, Key } from "lucide-react";
+import { BookOpen, Keyboard, LogIn, Puzzle, Settings2, Home, Wallet, Key } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { AnimatedThemeToggler } from "@/components/ui/animated-theme-toggler";
@@ -9,11 +9,14 @@ import { VersionReleaseModal } from "@/components/layout/version-release-modal";
 import { DOCS_URL } from "@/constant/env";
 import { TOP_NAV_HIDDEN_ITEMS } from "@/constant/runtime-config";
 import { NEW_API_LINKS } from "@/config/oauth";
+import { ensureAuthenticated } from "@/services/auth-gate";
 import { changeAppLocale, type AppLocale } from "@/i18n";
 import { cn } from "@/lib/utils";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useConfigStore } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { useAuthStore } from "@/stores/use-auth-store";
+import { isTokenExpired } from "@/services/oauth";
 
 type UserStatusActionsProps = {
     showConfig?: boolean;
@@ -36,10 +39,23 @@ export function UserStatusActions({ showConfig = true, variant = "default", onOp
     const locale = i18n.resolvedLanguage as AppLocale;
     const nextLocale = locale === "zh-CN" ? "en-US" : "zh-CN";
     const languageLabel = t("topNav.switchLanguage", { language: t(nextLocale === "zh-CN" ? "locale.zhCN" : "locale.enUS") });
-    const hidden = (item: string) => TOP_NAV_HIDDEN_ITEMS.has(item);
+    const hidden = (item: string) => {
+        // TOP_NAV_HIDDEN suppresses entries for normal users and guests;
+        // New API administrators always see the full top bar.
+        if (useAuthStore.getState().isAdmin()) return false;
+        return TOP_NAV_HIDDEN_ITEMS.has(item);
+    };
+    const token = useAuthStore((state) => state.token);
+    const expiresAt = useAuthStore((state) => state.expiresAt);
+    const loggedIn = Boolean(token && expiresAt && !isTokenExpired(expiresAt));
 
     return (
         <div className="inline-flex shrink-0 items-center gap-1">
+            {!loggedIn && !hidden("login") ? (
+                <button type="button" className={naturalIconClass} style={iconStyle} onClick={() => ensureAuthenticated()} aria-label={t("topNav.login")} title={t("topNav.login")}>
+                    <LogIn className="size-4" />
+                </button>
+            ) : null}
             {!hidden("home") ? (
                 <button type="button" className={naturalIconClass} style={iconStyle} onClick={() => window.location.href = NEW_API_LINKS.home} aria-label={t("userActions.home")} title={t("userActions.home")}>
                     <Home className="size-4" />

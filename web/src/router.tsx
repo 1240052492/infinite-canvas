@@ -1,7 +1,6 @@
 import { createBrowserRouter, Outlet } from "react-router-dom";
 
 import { AnalyticsTracker } from "@/components/layout/analytics-tracker";
-import { AuthGuard } from "@/components/auth-guard";
 import { OAuthCallback } from "@/pages/oauth-callback";
 import UserLayout from "@/layouts/user-layout";
 import AssetsPage from "@/pages/assets";
@@ -20,13 +19,14 @@ export const router = createBrowserRouter([
         element: <OAuthCallback />,
     },
     {
+        // Guest mode: routes are browsable without login. Internal features
+        // (generation, questions, ...) call ensureAuthenticated() and start
+        // the OAuth redirect when the visitor is not logged in.
         element: (
-            <AuthGuard>
-                <UserLayout>
-                    <AnalyticsTracker />
-                    <Outlet />
-                </UserLayout>
-            </AuthGuard>
+            <UserLayout>
+                <AnalyticsTracker />
+                <Outlet />
+            </UserLayout>
         ),
         children: [
             { path: "/", element: <HomePage /> },

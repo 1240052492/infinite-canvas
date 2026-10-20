@@ -16,6 +16,8 @@ import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent }
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
 import { computeMediaSize, inferMediaRatio, inferMediaScale, mediaScaleOptions, parseVideoResolution } from "@/lib/media-size";
+import { useAuthStore } from "@/stores/use-auth-store";
+import { NEW_API_ADMIN_ROLE } from "@/types/auth";
 import { createModelChannel, modelOptionsFromChannels, normalizeModelOptionValue, selectableModelsByCapability, useConfigStore, type AiConfig, type ApiCallFormat, type ConfigTabKey, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 
 type ModelGroup = {
@@ -52,8 +54,12 @@ function createWebdavDomainProgress(): Record<AppSyncDomainKey, WebdavDomainProg
 export function AppConfigPanel({ showDoneButton = false, initialTab = "channels" }: { showDoneButton?: boolean; initialTab?: ConfigTabKey }) {
     const { message } = App.useApp();
     const { i18n, t } = useTranslation();
+    // Local proxy and prompt-source management are admin-only entry points;
+    // normal users and guests work with the preset defaults.
+    const isAdmin = useAuthStore((state) => state.isAuthenticated && state.role !== null && state.role >= NEW_API_ADMIN_ROLE);
+    const resolvedInitialTab: ConfigTabKey = !isAdmin && (initialTab === "local-proxy" || initialTab === "prompt-sources") ? "channels" : initialTab;
     const configInputRef = useRef<HTMLInputElement>(null);
-    const [activeTab, setActiveTab] = useState<ConfigTabKey>(initialTab);
+    const [activeTab, setActiveTab] = useState<ConfigTabKey>(resolvedInitialTab);
     const [editingChannelId, setEditingChannelId] = useState("");
     const [testingWebdav, setTestingWebdav] = useState(false);
     const [syncingWebdav, setSyncingWebdav] = useState(false);
@@ -215,11 +221,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                             </div>
                         ),
                     },
-                    {
-                        key: "local-proxy",
-                        label: t("config.tabs.localProxy"),
-                        children: <ConfigLocalProxy />,
-                    },
+                    ...(isAdmin ? [{ key: "local-proxy", label: t("config.tabs.localProxy"), children: <ConfigLocalProxy /> }] : []),
                     {
                         key: "preferences",
                         label: t("config.tabs.preferences"),
@@ -296,11 +298,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                             </Form>
                         ),
                     },
-                    {
-                        key: "prompt-sources",
-                        label: t("config.tabs.promptSources"),
-                        children: <ConfigPromptSources />,
-                    },
+                    ...(isAdmin ? [{ key: "prompt-sources", label: t("config.tabs.promptSources"), children: <ConfigPromptSources /> }] : []),
                     {
                         key: "webdav",
                         label: "WebDAV",
