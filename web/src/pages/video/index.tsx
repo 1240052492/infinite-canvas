@@ -1,5 +1,5 @@
-import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, LoaderCircle, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon } from "lucide-react";
-import { useEffect, useRef, useState, useSyncExternalStore, type DragEvent } from "react";
+import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ChevronDown, ClipboardPaste, Download, FolderPlus, History, LoaderCircle, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon, Wand2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type ReactNode } from "react";
 import { App, Button, Checkbox, Drawer, Empty, Input, Modal, Tag, Typography } from "antd";
 import localforage from "localforage";
 import { nanoid } from "nanoid";
@@ -8,11 +8,14 @@ import { useTranslation } from "react-i18next";
 
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { CreationGuideModal } from "@/components/creation-guide-modal";
-import { ModelPicker } from "@/components/model-picker";
+import { VendorModelPicker } from "@/components/vendor-model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoModeLabel, videoSizeLabel } from "@/components/video-settings-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { clusterSimilarLogs, groupLogsByDate, logSimilarityKey } from "@/lib/log-grouping";
+import { cn } from "@/lib/utils";
 import { clampVideoSeconds } from "@/lib/media-size";
+import { requestPromptOptimization } from "@/services/api/prompt-optimize";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { deleteStoredMedia, resolveMediaUrl } from "@/services/file-storage";
 import { resolveImageUrl, ensureImagePreview, getImagePreviewRevision, previewUrlFor, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
@@ -63,6 +66,24 @@ type GenerationLog = {
 
 type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "videoMode">;
 
+type VideoTask = {
+    id: string;
+    logId?: string;
+    agentTaskId?: string;
+    prompt: string;
+    model: string;
+    createdAt: number;
+    status: "queued" | "running" | "success" | "failed";
+    error?: string;
+    video?: GeneratedVideo;
+    references: ReferenceImage[];
+    config: AiConfig;
+};
+
+// At most this many video tasks run their API calls at the same time; further
+// submissions are queued after a reminder dialog.
+const MAX_CONCURRENT_TASKS = 3;
+
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
 const LOG_STORE_KEY = "infinite-canvas:video_generation_logs";
@@ -83,20 +104,20 @@ export default function VideoPage() {
     const addAsset = useAssetStore((state) => state.addAsset);
     const [prompt, setPrompt] = useState("");
     const [references, setReferences] = useState<ReferenceImage[]>([]);
-    const [results, setResults] = useState<GenerationResult[]>([]);
+    const [previewResults, setPreviewResults] = useState<GenerationResult[]>([]);
+    const [tasks, setTasks] = useState<VideoTask[]>([]);
     const [logs, setLogs] = useState<GenerationLog[]>([]);
-    const [running, setRunning] = useState(false);
     const [logsOpen, setLogsOpen] = useState(false);
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [promptDialogOpen, setPromptDialogOpen] = useState(false);
     const [assetPickerOpen, setAssetPickerOpen] = useState(false);
-    const [startedAt, setStartedAt] = useState(0);
-    const [elapsedMs, setElapsedMs] = useState(0);
     const [selectedLogIds, setSelectedLogIds] = useState<string[]>([]);
     const [previewLog, setPreviewLog] = useState<GenerationLog | null>(null);
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
     const [referenceDragTarget, setReferenceDragTarget] = useState(false);
     const [autoRunToken, setAutoRunToken] = useState(0);
+    const [optimizing, setOptimizing] = useState(false);
+    const startedTasksRef = useRef(new Set<string>());
     const videoCommand = useWorkbenchAgentStore((state) => state.videoCommand);
     const clearVideoCommand = useWorkbenchAgentStore((state) => state.clearVideoCommand);
     const updateAgentTask = useWorkbenchAgentStore((state) => state.updateTask);
@@ -105,16 +126,26 @@ export default function VideoPage() {
 
     const model = effectiveConfig.videoModel || effectiveConfig.model;
     const canGenerate = Boolean(prompt.trim());
-
-    useEffect(() => {
-        if (!running || !startedAt) return;
-        const timer = window.setInterval(() => setElapsedMs(performance.now() - startedAt), 1000);
-        return () => window.clearInterval(timer);
-    }, [running, startedAt]);
+    const runningTasks = tasks.filter((task) => task.status === "running");
+    const queuedTasks = tasks.filter((task) => task.status === "queued");
+    const running = tasks.some((task) => task.status === "running" || task.status === "queued");
 
     useEffect(() => {
         void refreshLogs();
     }, []);
+
+    // Task scheduler: start queued submissions while fewer than
+    // MAX_CONCURRENT_TASKS are running. startedTasksRef guarantees each task
+    // starts exactly once even when the effect re-fires on state changes.
+    useEffect(() => {
+        if (runningTasks.length >= MAX_CONCURRENT_TASKS) return;
+        const next = tasks.find((task) => task.status === "queued" && !startedTasksRef.current.has(task.id));
+        if (!next) return;
+        startedTasksRef.current.add(next.id);
+        setTasks((value) => value.map((task) => (task.id === next.id ? { ...task, status: "running" } : task)));
+        void startVideoTask(next);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [tasks]);
 
     const addReferences = async (files?: FileList | null) => {
         const selectedFiles = Array.from(files || []);
@@ -169,7 +200,7 @@ export default function VideoPage() {
             message.error(t("videoWorkbench.clipboardEmpty"));
         }
     };
-    const generate = async () => {
+    const submitTask = () => {
         const agentTaskId = agentTaskIdRef.current;
         agentTaskIdRef.current = undefined;
         const snapshot = buildRequestSnapshot();
@@ -177,25 +208,59 @@ export default function VideoPage() {
             if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", error: t("videoWorkbench.invalidParams") });
             return;
         }
-        setElapsedMs(0);
-        setRunning(true);
-        if (agentTaskId) updateAgentTask(agentTaskId, { status: "running", error: undefined });
-        setPreviewLog(null);
-        setResults([{ id: nanoid(), status: "pending" }]);
-        const batchStartedAt = performance.now();
-        setStartedAt(batchStartedAt);
+
+        const enqueue = () => {
+            setPreviewLog(null);
+            setPreviewResults([]);
+            setTasks((value) => [
+                ...value,
+                { id: nanoid(), ...(agentTaskId ? { agentTaskId } : {}), prompt: snapshot.text, model, createdAt: Date.now(), status: "queued", references: snapshot.references, config: snapshot.config },
+            ]);
+        };
+
+        if (runningTasks.length >= MAX_CONCURRENT_TASKS) {
+            Modal.confirm({
+                title: t("workbench.concurrentLimitTitle"),
+                content: t("workbench.concurrentLimitContent", { limit: MAX_CONCURRENT_TASKS }),
+                okText: t("workbench.queueTask"),
+                cancelText: t("common.cancel"),
+                onOk: enqueue,
+            });
+            return;
+        }
+        enqueue();
+    };
+
+    const generate = submitTask;
+
+    const optimizePromptText = async () => {
+        setOptimizing(true);
         try {
-            const task = await createVideoGenerationTask(snapshot.config, snapshot.text, snapshot.references);
-            const log = buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, durationMs: 0, status: "pending", task });
+            const optimized = await requestPromptOptimization(effectiveConfig, prompt, "video");
+            setPrompt(optimized);
+            message.success(t("workbench.promptOptimized"));
+        } catch (error) {
+            const raw = error instanceof Error ? error.message : "";
+            message.error(raw === "loginRequired" ? t("videoWorkbench.loginRequired") : t("workbench.promptOptimizeFailed"));
+        } finally {
+            setOptimizing(false);
+        }
+    };
+
+    const startVideoTask = async (task: VideoTask) => {
+        const batchStartedAt = performance.now();
+        try {
+            const created = await createVideoGenerationTask(task.config, task.prompt, task.references);
+            const log = buildLog({ prompt: task.prompt, model: task.model, config: task.config, references: task.references, durationMs: 0, status: "pending", task: created });
             await saveLog(log, false);
-            void pollGenerationLog(log, snapshot.config, agentTaskId);
+            setTasks((value) => value.map((item) => (item.id === task.id ? { ...item, logId: log.id } : item)));
+            await pollVideoTask(log, task.id, task.agentTaskId);
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : t("workbench.generationFailed");
-            setResults([{ id: nanoid(), status: "failed", error: errorMessage }]);
-            if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", successCount: 0, failCount: 1, error: errorMessage });
-            await saveLog(buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, durationMs: performance.now() - batchStartedAt, status: "failed", error: errorMessage }));
+            setTasks((value) => value.map((item) => (item.id === task.id ? { ...item, status: "failed", error: errorMessage } : item)));
+            if (task.agentTaskId) updateAgentTask(task.agentTaskId, { status: "failed", successCount: 0, failCount: 1, error: errorMessage });
+            await saveLog(buildLog({ prompt: task.prompt, model: task.model, config: task.config, references: task.references, durationMs: performance.now() - batchStartedAt, status: "failed", error: errorMessage }));
             message.error(errorMessage);
-            setRunning(false);
         }
     };
 
@@ -269,9 +334,8 @@ export default function VideoPage() {
     const createSession = () => {
         setPrompt("");
         setReferences([]);
-        setResults([]);
-        setElapsedMs(0);
-        setStartedAt(0);
+        setPreviewResults([]);
+        setTasks([]);
         setSelectedLogIds([]);
         setPreviewLog(null);
     };
@@ -284,7 +348,7 @@ export default function VideoPage() {
         void Promise.all([deleteStoredMedia(mediaKeys), ...selectedLogIds.map((id) => logStore.removeItem(id))]).then(() => refreshLogs());
         if (previewLog && selectedLogIds.includes(previewLog.id)) {
             setPreviewLog(null);
-            setResults([]);
+            setPreviewResults([]);
         }
         setSelectedLogIds([]);
         setDeleteConfirmOpen(false);
@@ -304,16 +368,29 @@ export default function VideoPage() {
 
     const resumePendingLogs = (items: GenerationLog[]) => {
         for (const log of items) {
-            if (log.status === "pending" && log.task) void pollGenerationLog(log);
+            if (log.status !== "pending" || !log.task) continue;
+            setTasks((value) => {
+                if (value.some((task) => task.logId === log.id || task.id === `resume-${log.id}`)) return value;
+                return [
+                    ...value,
+                    { id: `resume-${log.id}`, logId: log.id, prompt: log.prompt, model: log.model, createdAt: log.createdAt, status: "running" as const, references: log.references || [], config: buildVideoConfig({ ...effectiveConfig, ...log.config }, log.task?.model || log.model) },
+                ];
+            });
+            void pollGenerationLog(log);
         }
     };
 
-    const pollGenerationLog = async (log: GenerationLog, configOverride?: AiConfig, agentTaskId?: string) => {
+    const pollVideoTask = async (log: GenerationLog, taskId: string, agentTaskId?: string) => {
+        await pollGenerationLog(log, undefined, agentTaskId, taskId);
+    };
+
+    const pollGenerationLog = async (log: GenerationLog, configOverride?: AiConfig, agentTaskId?: string, taskId?: string) => {
         if (!log.task || activeLogIdsRef.current.has(log.id)) return;
         activeLogIdsRef.current.add(log.id);
-        setRunning(true);
-        setStartedAt((value) => value || performance.now());
-        setResults((value) => (value.length ? value : [{ id: log.id, status: "pending" }]));
+        const updateTask = (next: Partial<VideoTask>) => {
+            if (!taskId) return;
+            setTasks((value) => value.map((item) => (item.id === taskId ? { ...item, ...next } : item)));
+        };
         const taskConfig = buildVideoConfig({ ...effectiveConfig, ...log.config }, log.task.model || log.model);
         try {
             for (let attempt = 0; attempt < 120; attempt += 1) {
@@ -330,7 +407,7 @@ export default function VideoPage() {
                         bytes: stored.bytes,
                         mimeType: stored.mimeType,
                     };
-                    setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
+                    updateTask({ status: "success", video: nextVideo });
                     if (agentTaskId) updateAgentTask(agentTaskId, { status: "succeeded", successCount: 1, failCount: 0, error: undefined });
                     await saveLog({ ...log, status: "success", durationMs: nextVideo.durationMs, video: nextVideo, error: undefined });
                     message.success(t("videoWorkbench.generated"));
@@ -342,16 +419,12 @@ export default function VideoPage() {
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : t("workbench.generationFailed");
-            setResults([{ id: log.id, status: "failed", error: errorMessage }]);
+            updateTask({ status: "failed", error: errorMessage });
             if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", successCount: 0, failCount: 1, error: errorMessage });
             await saveLog({ ...log, status: "failed", durationMs: Date.now() - log.createdAt, error: errorMessage });
             message.error(errorMessage);
         } finally {
             activeLogIdsRef.current.delete(log.id);
-            if (!activeLogIdsRef.current.size) {
-                setRunning(false);
-                setStartedAt(0);
-            }
         }
     };
 
@@ -367,7 +440,7 @@ export default function VideoPage() {
         if (log.config.videoGenerateAudio) updateConfig("videoGenerateAudio", log.config.videoGenerateAudio);
         if (log.config.videoWatermark) updateConfig("videoWatermark", log.config.videoWatermark);
         if (log.config.videoMode) updateConfig("videoMode", log.config.videoMode);
-        setResults(log.status === "pending" ? [{ id: log.id, status: "pending" }] : log.video ? [{ id: log.video.id, status: "success", video: log.video }] : [{ id: log.id, status: "failed", error: log.error || t("workbench.generationFailed") }]);
+        setPreviewResults(log.status === "pending" ? [{ id: log.id, status: "pending" }] : log.video ? [{ id: log.video.id, status: "success", video: log.video }] : [{ id: log.id, status: "failed", error: log.error || t("workbench.generationFailed") }]);
     };
 
     return (
@@ -397,6 +470,9 @@ export default function VideoPage() {
                                 <div className="mb-2 flex items-center justify-between gap-3">
                                     <span className="text-base font-semibold">{t("workbench.prompt")}</span>
                                     <div className="flex gap-2">
+                                        <Button size="small" icon={<Wand2 className="size-3.5" />} loading={optimizing} disabled={!prompt.trim()} onClick={() => void optimizePromptText()}>
+                                            {t("workbench.optimizePrompt")}
+                                        </Button>
                                         <Button size="small" icon={<BookOpen className="size-3.5" />} onClick={() => setPromptDialogOpen(true)}>
                                             {t("workbench.viewPrompts")}
                                         </Button>
@@ -459,7 +535,7 @@ export default function VideoPage() {
                         </div>
 
                         <div className="mt-auto pt-6">
-                            <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
+                            <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} disabled={!canGenerate} onClick={() => void generate()}>
                                 {t("workbench.generate")}
                             </Button>
                         </div>
@@ -468,11 +544,21 @@ export default function VideoPage() {
                     <div className="thin-scrollbar rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:min-h-0 lg:overflow-y-auto lg:p-5">
                         <div className="mb-4 flex items-center justify-between gap-3">
                             <h2 className="text-xl font-semibold">{t("workbench.results")}</h2>
-                            {running ? <Tag className="m-0 px-2 py-1">{t("workbench.waiting", { time: formatDuration(elapsedMs) })}</Tag> : null}
+                            {running ? (
+                                <Tag className="m-0 px-2 py-1">
+                                    {t("workbench.taskActivity", { running: runningTasks.length, queued: queuedTasks.length })}
+                                </Tag>
+                            ) : null}
                         </div>
-                        {results.length ? (
+                        {previewLog ? (
                             <div className="grid gap-4">
-                                {results.map((result) => (result.status === "success" && result.video ? <ResultVideoCard key={result.id} video={result.video} onDownload={downloadVideo} onSaveAsset={saveResultToAssets} /> : result.status === "failed" ? <FailedVideoCard key={result.id} error={result.error || t("workbench.generationFailed")} onRetry={retryResult} /> : <PendingVideoCard key={result.id} />))}
+                                {previewResults.map((result) => (result.status === "success" && result.video ? <ResultVideoCard key={result.id} video={result.video} onDownload={downloadVideo} onSaveAsset={saveResultToAssets} /> : result.status === "failed" ? <FailedVideoCard key={result.id} error={result.error || t("workbench.generationFailed")} onRetry={retryResult} /> : <PendingVideoCard key={result.id} />))}
+                            </div>
+                        ) : tasks.length ? (
+                            <div className="space-y-5">
+                                {[...tasks].reverse().map((task) => (
+                                    <VideoTaskCard key={task.id} task={task} onDownload={downloadVideo} onSaveAsset={saveResultToAssets} />
+                                ))}
                             </div>
                         ) : (
                             <div className="flex min-h-[320px] flex-col items-center justify-center rounded-lg border border-dashed border-stone-300 text-center dark:border-stone-700 lg:min-h-[560px]">
@@ -517,14 +603,54 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
 
     return (
         <>
-            <label className="col-span-2 block min-w-0 sm:col-span-1">
+            <label className="col-span-2 block min-w-0">
                 <span className="mb-1.5 block text-sm font-semibold sm:mb-2 sm:text-base">{t("workbench.model")}</span>
-                <ModelPicker config={config} value={model} onChange={(value) => updateConfig("videoModel", value)} capability="video" fullWidth onMissingConfig={() => openConfigDialog(false)} />
+                <VendorModelPicker config={config} value={model} onChange={(value) => updateConfig("videoModel", value)} capability="video" onMissingConfig={() => openConfigDialog(false)} />
             </label>
             <div className="col-span-2">
                 <VideoSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" />
             </div>
         </>
+    );
+}
+
+function VideoTaskCard({
+    task,
+    onDownload,
+    onSaveAsset,
+}: {
+    task: VideoTask;
+    onDownload: (video: GeneratedVideo) => void;
+    onSaveAsset: (video: GeneratedVideo) => void;
+}) {
+    const { t } = useTranslation();
+    const statusTag = task.status === "queued" ? { color: "default", label: t("workbench.taskQueued") } : task.status === "running" ? { color: "processing", label: t("workbench.taskRunning") } : task.status === "success" ? { color: "success", label: t("workbench.taskSuccess") } : { color: "error", label: t("workbench.taskFailed") };
+    return (
+        <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-800">
+            <div className="mb-3 flex min-w-0 items-center justify-between gap-3">
+                <div className="min-w-0 text-sm">
+                    <Typography.Paragraph ellipsis={{ rows: 1 }} className="!mb-0 font-medium">
+                        {task.prompt}
+                    </Typography.Paragraph>
+                    <span className="text-xs text-stone-500 dark:text-stone-400">
+                        {task.model} · {new Date(task.createdAt).toLocaleTimeString()}
+                    </span>
+                </div>
+                <Tag className="m-0 shrink-0 px-2 py-0.5" color={statusTag.color}>
+                    {statusTag.label}
+                </Tag>
+            </div>
+            {task.status === "success" && task.video ? (
+                <ResultVideoCard video={task.video} onDownload={onDownload} onSaveAsset={onSaveAsset} />
+            ) : task.status === "failed" ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-600 dark:border-red-950 dark:bg-red-950/20 dark:text-red-300">{task.error || t("workbench.generationFailed")}</div>
+            ) : (
+                <div className="flex h-24 items-center justify-center rounded border border-dashed border-stone-300 text-sm text-stone-500 dark:border-stone-700 dark:text-stone-400">
+                    <LoaderCircle className="mr-2 size-4 animate-spin" />
+                    {task.status === "queued" ? t("workbench.taskWaitingInQueue") : t("workbench.generating")}
+                </div>
+            )}
+        </div>
     );
 }
 
@@ -605,6 +731,20 @@ function LogPanel({
     const { t } = useTranslation();
     const allSelected = Boolean(logs.length) && selectedLogIds.length === logs.length;
     const toggleAll = () => onSelectedLogIdsChange(allSelected ? [] : logs.map((log) => log.id));
+    const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+    const toggleGroup = (key: string) =>
+        setCollapsedGroups((value) => {
+            const next = new Set(value);
+            next.has(key) ? next.delete(key) : next.add(key);
+            return next;
+        });
+
+    const dateGroups = useMemo(() => groupLogsByDate(logs, (log) => log.createdAt), [logs]);
+
+    const renderLogList = (items: GenerationLog[]) =>
+        items.map((log) => (
+            <LogCard key={log.id} log={log} selected={selectedLogIds.includes(log.id)} active={activeLogId === log.id} onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))} onClick={() => onPreviewLog(log)} />
+        ));
 
     return (
         <>
@@ -623,13 +763,54 @@ function LogPanel({
                     {t("common.delete")}
                 </Button>
             </div>
-            <div className="space-y-3">
-                {logs.map((log) => (
-                    <LogCard key={log.id} log={log} selected={selectedLogIds.includes(log.id)} active={activeLogId === log.id} onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))} onClick={() => onPreviewLog(log)} />
-                ))}
+            <div className="space-y-4">
+                {dateGroups.map((group) => {
+                    const groupKey = `date:${group.kind}`;
+                    const collapsed = collapsedGroups.has(groupKey);
+                    const clusters = clusterSimilarLogs(group.logs, (log) => logSimilarityKey(log.prompt, log.model));
+                    return (
+                        <div key={groupKey}>
+                            <button type="button" className="mb-2 flex w-full items-center justify-between gap-2 rounded px-1 py-1 text-left text-xs font-semibold uppercase tracking-wide text-stone-500 hover:bg-stone-100 dark:text-stone-400 dark:hover:bg-stone-900" onClick={() => toggleGroup(groupKey)}>
+                                <span>
+                                    {t(`workbench.logGroup.${group.kind}`)} · {group.logs.length}
+                                </span>
+                                <ChevronDown className={cn("size-3.5 transition-transform", collapsed && "-rotate-90")} />
+                            </button>
+                            {!collapsed ? (
+                                <div className="space-y-3">
+                                    {clusters.map((cluster) => (cluster.logs.length > 1 ? <SimilarLogCluster key={cluster.key} logs={cluster.logs} renderLogList={renderLogList} /> : renderLogList(cluster.logs)))}
+                                </div>
+                            ) : null}
+                        </div>
+                    );
+                })}
                 {!logs.length ? <div className="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-stone-300 text-center text-sm text-stone-500 dark:border-stone-700">{t("workbench.noLogs")}</div> : null}
             </div>
         </>
+    );
+}
+
+function SimilarLogCluster({ logs, renderLogList }: { logs: GenerationLog[]; renderLogList: (items: GenerationLog[]) => ReactNode }) {
+    const { t } = useTranslation();
+    const [expanded, setExpanded] = useState(false);
+    const first = logs[0];
+
+    return (
+        <div className="rounded-lg border border-stone-200 bg-stone-50/60 p-2 dark:border-stone-800 dark:bg-stone-900/40">
+            <button type="button" className="flex w-full items-center justify-between gap-2 text-left" onClick={() => setExpanded((value) => !value)}>
+                <span className="min-w-0 flex-1 text-xs">
+                    <Typography.Paragraph ellipsis={{ rows: 1 }} className="!mb-0 font-medium">
+                        {first.prompt || first.title}
+                    </Typography.Paragraph>
+                    <span className="text-stone-500 dark:text-stone-400">{first.model}</span>
+                </span>
+                <span className="flex shrink-0 items-center gap-1.5">
+                    <Tag className="m-0 px-1.5 py-0">{t("workbench.similarCount", { count: logs.length })}</Tag>
+                    <ChevronDown className={cn("size-3.5 transition-transform", !expanded && "-rotate-90")} />
+                </span>
+            </button>
+            {expanded ? <div className="mt-2 space-y-3">{renderLogList(logs)}</div> : null}
+        </div>
     );
 }
 

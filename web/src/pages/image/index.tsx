@@ -1,5 +1,5 @@
-import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ChevronDown, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, Wand2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Tag, Tooltip, Typography } from "antd";
 import localforage from "localforage";
 import { saveAs } from "file-saver";
@@ -7,16 +7,19 @@ import { useTranslation } from "react-i18next";
 
 import { ImageSettingsPanel } from "@/components/image-settings-panel";
 import { CreationGuideModal } from "@/components/creation-guide-modal";
-import { ModelPicker } from "@/components/model-picker";
+import { VendorModelPicker } from "@/components/vendor-model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { clusterSimilarLogs, groupLogsByDate, logSimilarityKey } from "@/lib/log-grouping";
+import { cn } from "@/lib/utils";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { requestEdit, requestGeneration } from "@/services/api/image";
+import { requestPromptOptimization } from "@/services/api/prompt-optimize";
 import { deleteStoredImages, ensureImagePreview, getImagePreviewRevision, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
@@ -62,6 +65,23 @@ type GenerationLog = {
 
 type GenerationLogConfig = Pick<AiConfig, "model" | "imageModel" | "quality" | "size" | "count">;
 
+type WorkbenchTask = {
+    id: string;
+    agentTaskId?: string;
+    prompt: string;
+    model: string;
+    createdAt: number;
+    status: "queued" | "running" | "success" | "failed";
+    error?: string;
+    config: AiConfig;
+    references: ReferenceImage[];
+    results: GenerationResult[];
+};
+
+// At most this many generation tasks run their API calls at the same time;
+// further submissions are queued after a reminder dialog.
+const MAX_CONCURRENT_TASKS = 3;
+
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
 const LOG_STORE_KEY = "infinite-canvas:image_generation_logs";
@@ -82,20 +102,20 @@ export default function ImagePage() {
     const addAsset = useAssetStore((state) => state.addAsset);
     const [prompt, setPrompt] = useState("");
     const [references, setReferences] = useState<ReferenceImage[]>([]);
-    const [results, setResults] = useState<GenerationResult[]>([]);
+    const [previewResults, setPreviewResults] = useState<GenerationResult[]>([]);
+    const [tasks, setTasks] = useState<WorkbenchTask[]>([]);
     const [logs, setLogs] = useState<GenerationLog[]>([]);
-    const [running, setRunning] = useState(false);
     const [logsOpen, setLogsOpen] = useState(false);
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [promptDialogOpen, setPromptDialogOpen] = useState(false);
     const [assetPickerOpen, setAssetPickerOpen] = useState(false);
-    const [startedAt, setStartedAt] = useState(0);
-    const [elapsedMs, setElapsedMs] = useState(0);
     const [selectedLogIds, setSelectedLogIds] = useState<string[]>([]);
     const [previewLog, setPreviewLog] = useState<GenerationLog | null>(null);
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
     const [isReferenceDragActive, setIsReferenceDragActive] = useState(false);
     const [autoRunToken, setAutoRunToken] = useState(0);
+    const [optimizing, setOptimizing] = useState(false);
+    const startedTasksRef = useRef(new Set<string>());
     const imageCommand = useWorkbenchAgentStore((state) => state.imageCommand);
     const clearImageCommand = useWorkbenchAgentStore((state) => state.clearImageCommand);
     const updateAgentTask = useWorkbenchAgentStore((state) => state.updateTask);
@@ -105,16 +125,26 @@ export default function ImagePage() {
     const model = effectiveConfig.imageModel || effectiveConfig.model;
     const canGenerate = Boolean(prompt.trim());
     const generationCount = Math.max(1, Math.min(10, Number(config.count) || 1));
-
-    useEffect(() => {
-        if (!running || !startedAt) return;
-        const timer = window.setInterval(() => setElapsedMs(performance.now() - startedAt), 1000);
-        return () => window.clearInterval(timer);
-    }, [running, startedAt]);
+    const runningTasks = tasks.filter((task) => task.status === "running");
+    const queuedTasks = tasks.filter((task) => task.status === "queued");
+    const running = tasks.some((task) => task.status === "running" || task.status === "queued");
 
     useEffect(() => {
         void refreshLogs();
     }, []);
+
+    // Task scheduler: start queued submissions while fewer than
+    // MAX_CONCURRENT_TASKS are running. startedTasksRef guarantees each task
+    // starts exactly once even when the effect re-fires on state changes.
+    useEffect(() => {
+        if (runningTasks.length >= MAX_CONCURRENT_TASKS) return;
+        const next = tasks.find((task) => task.status === "queued" && !startedTasksRef.current.has(task.id));
+        if (!next) return;
+        startedTasksRef.current.add(next.id);
+        setTasks((value) => value.map((task) => (task.id === next.id ? { ...task, status: "running" } : task)));
+        void runTask(next);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [tasks]);
 
     const addReferences = async (files?: FileList | null) => {
         const imageFiles = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
@@ -148,7 +178,7 @@ export default function ImagePage() {
         }
     };
 
-    const generate = async () => {
+    const submitTask = () => {
         const agentTaskId = agentTaskIdRef.current;
         agentTaskIdRef.current = undefined;
         const text = prompt.trim();
@@ -170,41 +200,41 @@ export default function ImagePage() {
             return;
         }
 
-        setElapsedMs(0);
-        setRunning(true);
-        if (agentTaskId) updateAgentTask(agentTaskId, { status: "running", error: undefined });
-        setPreviewLog(null);
-        setResults(Array.from({ length: generationCount }, () => ({ id: nanoid(), status: "pending" })));
-        const batchStartedAt = performance.now();
-        setStartedAt(batchStartedAt);
+        const enqueue = () => {
+            setPreviewLog(null);
+            setPreviewResults([]);
+            setTasks((value) => [
+                ...value,
+                { id: nanoid(), ...(agentTaskId ? { agentTaskId } : {}), prompt: text, model, createdAt: Date.now(), status: "queued", config: snapshot.config, references: snapshot.references, results: [] },
+            ]);
+        };
 
-        const tasks = Array.from({ length: generationCount }, (_, index) => runGenerationSlot(index, snapshot));
+        if (runningTasks.length >= MAX_CONCURRENT_TASKS) {
+            Modal.confirm({
+                title: t("workbench.concurrentLimitTitle"),
+                content: t("workbench.concurrentLimitContent", { limit: MAX_CONCURRENT_TASKS }),
+                okText: t("workbench.queueTask"),
+                cancelText: t("common.cancel"),
+                onOk: enqueue,
+            });
+            return;
+        }
+        enqueue();
+    };
 
-        const result = await Promise.allSettled(tasks);
-        const successImages = result.filter((item): item is PromiseFulfilledResult<GeneratedImage> => item.status === "fulfilled").map((item) => item.value);
-        const successCount = successImages.length;
-        const failCount = generationCount - successCount;
-        const failed = result.find((item): item is PromiseRejectedResult => item.status === "rejected");
-        const error = failed?.reason instanceof Error ? failed.reason.message : failCount ? t("workbench.generationFailed") : undefined;
-        if (agentTaskId) updateAgentTask(agentTaskId, { status: successCount ? "succeeded" : "failed", successCount, failCount, error: successCount ? undefined : error });
+    const generate = submitTask;
 
+    const optimizePromptText = async () => {
+        setOptimizing(true);
         try {
-            saveLog(
-                buildLog({
-                    prompt: text,
-                    model,
-                    config: { ...snapshot.config, count: String(generationCount) },
-                    references: snapshot.references,
-                    durationMs: performance.now() - batchStartedAt,
-                    successCount,
-                    failCount,
-                    status: successCount ? "success" : "failed",
-                    images: successImages,
-                }),
-            );
-            successCount ? message.success(t("imageWorkbench.generated")) : message.error(failed?.reason instanceof Error ? failed.reason.message : t("workbench.generationFailed"));
+            const optimized = await requestPromptOptimization(effectiveConfig, prompt, "image");
+            setPrompt(optimized);
+            message.success(t("workbench.promptOptimized"));
+        } catch (error) {
+            const raw = error instanceof Error ? error.message : "";
+            message.error(raw === "loginRequired" ? t("imageWorkbench.loginRequired") : t("workbench.promptOptimizeFailed"));
         } finally {
-            setRunning(false);
+            setOptimizing(false);
         }
     };
 
@@ -269,9 +299,8 @@ export default function ImagePage() {
     const createSession = () => {
         setPrompt("");
         setReferences([]);
-        setResults([]);
-        setElapsedMs(0);
-        setStartedAt(0);
+        setPreviewResults([]);
+        setTasks([]);
         setSelectedLogIds([]);
         setPreviewLog(null);
     };
@@ -281,7 +310,7 @@ export default function ImagePage() {
         void Promise.all([deleteStoredImages(imageKeys), ...selectedLogIds.map((id) => logStore.removeItem(id))]).then(refreshLogs);
         if (previewLog && selectedLogIds.includes(previewLog.id)) {
             setPreviewLog(null);
-            setResults([]);
+            setPreviewResults([]);
         }
         setSelectedLogIds([]);
         setDeleteConfirmOpen(false);
@@ -302,7 +331,7 @@ export default function ImagePage() {
         if (log.config.quality) updateConfig("quality", log.config.quality);
         if (log.config.size) updateConfig("size", log.config.size);
         if (log.config.count) updateConfig("count", log.config.count);
-        setResults(log.images.map((image) => ({ id: image.id, status: "success", image })));
+        setPreviewResults(log.images.map((image) => ({ id: image.id, status: "success", image })));
     };
 
     const buildRequestSnapshot = () => {
@@ -319,30 +348,68 @@ export default function ImagePage() {
         return { text, config: { ...effectiveConfig, model, count: "1" }, references: [...references] };
     };
 
-    const runGenerationSlot = async (index: number, snapshot: { text: string; config: AiConfig; references: ReferenceImage[] }) => {
-        const itemStartedAt = performance.now();
-        try {
-            const result = snapshot.references.length ? await requestEdit(snapshot.config, snapshot.text, snapshot.references) : await requestGeneration(snapshot.config, snapshot.text);
-            const image = result[0];
-            if (!image) throw new Error(t("imageWorkbench.missingResult"));
-            const stored = await uploadImage(image.dataUrl);
-            const nextImage: GeneratedImage = { id: image.id, dataUrl: stored.url, ...(stored.storageKey ? { storageKey: stored.storageKey } : {}), durationMs: performance.now() - itemStartedAt, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType };
-            setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
-            return nextImage;
-        } catch (error) {
-            setResults((value) => updateResultAt(value, index, { status: "failed", error: error instanceof Error ? error.message : t("workbench.generationFailed") }));
-            throw error;
-        }
+    const runTask = async (task: WorkbenchTask) => {
+        const count = Math.max(1, Math.min(10, Number(task.config.count) || 1));
+        const batchStartedAt = performance.now();
+        setTasks((value) => value.map((item) => (item.id === task.id ? { ...item, results: Array.from({ length: count }, () => ({ id: nanoid(), status: "pending" as const })) } : item)));
+
+        const updateTaskResult = (index: number, next: Partial<GenerationResult>) =>
+            setTasks((value) => value.map((item) => (item.id === task.id ? { ...item, results: updateResultAt(item.results, index, next) } : item)));
+
+        const runSlot = async (index: number): Promise<GeneratedImage> => {
+            const itemStartedAt = performance.now();
+            try {
+                const result = task.references.length ? await requestEdit(task.config, task.prompt, task.references) : await requestGeneration(task.config, task.prompt);
+                const image = result[0];
+                if (!image) throw new Error(t("imageWorkbench.missingResult"));
+                const stored = await uploadImage(image.dataUrl);
+                const nextImage: GeneratedImage = { id: image.id, dataUrl: stored.url, ...(stored.storageKey ? { storageKey: stored.storageKey } : {}), durationMs: performance.now() - itemStartedAt, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType };
+                updateTaskResult(index, { status: "success", image: nextImage });
+                return nextImage;
+            } catch (error) {
+                updateTaskResult(index, { status: "failed", error: error instanceof Error ? error.message : t("workbench.generationFailed") });
+                throw error;
+            }
+        };
+
+        const settled = await Promise.allSettled(Array.from({ length: count }, (_, index) => runSlot(index)));
+        const successImages = settled.filter((item): item is PromiseFulfilledResult<GeneratedImage> => item.status === "fulfilled").map((item) => item.value);
+        const successCount = successImages.length;
+        const failCount = count - successCount;
+        const failed = settled.find((item): item is PromiseRejectedResult => item.status === "rejected");
+        const error = failed?.reason instanceof Error ? failed.reason.message : failCount ? t("workbench.generationFailed") : undefined;
+        if (task.agentTaskId) updateAgentTask(task.agentTaskId, { status: successCount ? "succeeded" : "failed", successCount, failCount, error: successCount ? undefined : error });
+
+        saveLog(
+            buildLog({
+                prompt: task.prompt,
+                model: task.model,
+                config: { ...task.config, count: String(count) },
+                references: task.references,
+                durationMs: performance.now() - batchStartedAt,
+                successCount,
+                failCount,
+                status: successCount ? "success" : "failed",
+                images: successImages,
+            }),
+        );
+        setTasks((value) => value.map((item) => (item.id === task.id ? { ...item, status: successCount ? ("success" as const) : ("failed" as const), ...(error ? { error } : {}) } : item)));
+        successCount ? message.success(t("imageWorkbench.generated")) : message.error(error || t("workbench.generationFailed"));
     };
 
     const retryResult = async (index: number) => {
         const snapshot = buildRequestSnapshot();
         if (!snapshot) return;
         setPreviewLog(null);
-        setResults((value) => updateResultAt(value, index, { status: "pending", error: undefined, image: undefined }));
+        setPreviewResults((value) => updateResultAt(value, index, { status: "pending", error: undefined, image: undefined }));
         const retryStartedAt = performance.now();
         try {
-            const image = await runGenerationSlot(index, snapshot);
+            const result = snapshot.references.length ? await requestEdit(snapshot.config, snapshot.text, snapshot.references) : await requestGeneration(snapshot.config, snapshot.text);
+            const raw = result[0];
+            if (!raw) throw new Error(t("imageWorkbench.missingResult"));
+            const stored = await uploadImage(raw.dataUrl);
+            const image: GeneratedImage = { id: raw.id, dataUrl: stored.url, ...(stored.storageKey ? { storageKey: stored.storageKey } : {}), durationMs: performance.now() - retryStartedAt, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType };
+            setPreviewResults((value) => updateResultAt(value, index, { status: "success", image }));
             saveLog(
                 buildLog({
                     prompt: snapshot.text,
@@ -357,8 +424,8 @@ export default function ImagePage() {
                 }),
             );
             message.success(t("workbench.retrySuccess"));
-        } catch {
-            // runGenerationSlot has already marked the result as failed.
+        } catch (error) {
+            setPreviewResults((value) => updateResultAt(value, index, { status: "failed", error: error instanceof Error ? error.message : t("workbench.generationFailed") }));
         }
     };
 
@@ -401,6 +468,9 @@ export default function ImagePage() {
                                 <div className="mb-2 flex items-center justify-between gap-3">
                                     <span className="text-base font-semibold">{t("workbench.prompt")}</span>
                                     <div className="flex gap-2">
+                                        <Button size="small" icon={<Wand2 className="size-3.5" />} loading={optimizing} disabled={!prompt.trim()} onClick={() => void optimizePromptText()}>
+                                            {t("workbench.optimizePrompt")}
+                                        </Button>
                                         <Button size="small" icon={<BookOpen className="size-3.5" />} onClick={() => setPromptDialogOpen(true)}>
                                             {t("workbench.viewPrompts")}
                                         </Button>
@@ -486,7 +556,7 @@ export default function ImagePage() {
                         </div>
 
                         <div className="mt-auto pt-6">
-                            <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
+                            <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} disabled={!canGenerate} onClick={() => void generate()}>
                                 {t("workbench.generate")}
                             </Button>
                         </div>
@@ -497,19 +567,35 @@ export default function ImagePage() {
                             <div>
                                 <h2 className="text-xl font-semibold">{t("workbench.results")}</h2>
                             </div>
-                            {running ? <Tag className="m-0 px-2 py-1">{t("workbench.waiting", { time: formatDuration(elapsedMs) })}</Tag> : null}
+                            {running ? (
+                                <Tag className="m-0 px-2 py-1">
+                                    {t("workbench.taskActivity", { running: runningTasks.length, queued: queuedTasks.length })}
+                                </Tag>
+                            ) : null}
                         </div>
-                        {results.length ? (
+                        {previewLog ? (
                             <div className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-3">
-                                {results.map((result, index) =>
+                                {previewResults.map((result, index) =>
                                     result.status === "success" && result.image ? (
                                         <ResultImageCard key={result.id} image={result.image} index={index} onEdit={addResultToReferences} onDownload={downloadImage} onSaveAsset={saveResultToAssets} />
                                     ) : result.status === "failed" ? (
-                                        <FailedImageCard key={result.id} error={result.error || t("workbench.generationFailed")} onRetry={() => retryResult(index)} />
+                                        <FailedImageCard key={result.id} error={result.error || t("workbench.generationFailed")} onRetry={() => void retryResult(index)} />
                                     ) : (
                                         <PendingImageCard key={result.id} />
                                     ),
                                 )}
+                            </div>
+                        ) : tasks.length ? (
+                            <div className="space-y-5">
+                                {[...tasks].reverse().map((task) => (
+                                    <TaskCard
+                                        key={task.id}
+                                        task={task}
+                                        onEdit={addResultToReferences}
+                                        onDownload={downloadImage}
+                                        onSaveAsset={saveResultToAssets}
+                                    />
+                                ))}
                             </div>
                         ) : (
                             <div className="flex min-h-[320px] flex-col items-center justify-center rounded-lg border border-dashed border-stone-300 text-center dark:border-stone-700 lg:min-h-[560px]">
@@ -562,9 +648,9 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
 
     return (
         <>
-            <label className="col-span-2 block min-w-0 sm:col-span-1">
+            <label className="col-span-2 block min-w-0">
                 <span className="mb-1.5 block text-sm font-semibold sm:mb-2 sm:text-base">{t("workbench.model")}</span>
-                <ModelPicker config={config} value={model} onChange={(value) => updateConfig("imageModel", value)} capability="image" fullWidth onMissingConfig={() => openConfigDialog(false)} />
+                <VendorModelPicker config={config} value={model} onChange={(value) => updateConfig("imageModel", value)} capability="image" onMissingConfig={() => openConfigDialog(false)} />
             </label>
             <div className="col-span-2">
                 <ImageSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={10} />
@@ -640,7 +726,7 @@ function PendingImageCard() {
     );
 }
 
-function FailedImageCard({ error, onRetry }: { error: string; onRetry: () => void }) {
+function FailedImageCard({ error, onRetry }: { error: string; onRetry?: () => void }) {
     const { t } = useTranslation();
     return (
         <div className="overflow-hidden rounded-lg border border-red-200 bg-red-50 dark:border-red-950 dark:bg-red-950/20">
@@ -651,9 +737,11 @@ function FailedImageCard({ error, onRetry }: { error: string; onRetry: () => voi
                 </Typography.Paragraph>
             </div>
             <div className="flex justify-end border-t border-red-200 p-3 dark:border-red-950">
-                <Button size="small" danger onClick={onRetry}>
-                    {t("workbench.retry")}
-                </Button>
+                {onRetry ? (
+                    <Button size="small" danger onClick={onRetry}>
+                        {t("workbench.retry")}
+                    </Button>
+                ) : null}
             </div>
         </div>
     );
@@ -661,6 +749,53 @@ function FailedImageCard({ error, onRetry }: { error: string; onRetry: () => voi
 
 function updateResultAt(results: GenerationResult[], index: number, next: Partial<GenerationResult>) {
     return results.map((item, itemIndex) => (itemIndex === index ? { ...item, ...next } : item));
+}
+
+function TaskCard({
+    task,
+    onEdit,
+    onDownload,
+    onSaveAsset,
+}: {
+    task: WorkbenchTask;
+    onEdit: (image: GeneratedImage, index: number) => void;
+    onDownload: (image: GeneratedImage, index: number) => void;
+    onSaveAsset: (image: GeneratedImage, index: number) => void;
+}) {
+    const { t } = useTranslation();
+    const statusTag = task.status === "queued" ? { color: "default", label: t("workbench.taskQueued") } : task.status === "running" ? { color: "processing", label: t("workbench.taskRunning") } : task.status === "success" ? { color: "success", label: t("workbench.taskSuccess") } : { color: "error", label: t("workbench.taskFailed") };
+    return (
+        <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-800">
+            <div className="mb-3 flex min-w-0 items-center justify-between gap-3">
+                <div className="min-w-0 text-sm">
+                    <Typography.Paragraph ellipsis={{ rows: 1 }} className="!mb-0 font-medium">
+                        {task.prompt}
+                    </Typography.Paragraph>
+                    <span className="text-xs text-stone-500 dark:text-stone-400">
+                        {task.model} · {new Date(task.createdAt).toLocaleTimeString()}
+                    </span>
+                </div>
+                <Tag className="m-0 shrink-0 px-2 py-0.5" color={statusTag.color}>
+                    {statusTag.label}
+                </Tag>
+            </div>
+            {task.results.length ? (
+                <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                    {task.results.map((result, index) =>
+                        result.status === "success" && result.image ? (
+                            <ResultImageCard key={result.id} image={result.image} index={index} onEdit={onEdit} onDownload={onDownload} onSaveAsset={onSaveAsset} />
+                        ) : result.status === "failed" ? (
+                            <FailedImageCard key={result.id} error={result.error || task.error || t("workbench.generationFailed")} />
+                        ) : (
+                            <PendingImageCard key={result.id} />
+                        ),
+                    )}
+                </div>
+            ) : task.status === "queued" ? (
+                <div className="flex h-20 items-center justify-center rounded border border-dashed border-stone-300 text-sm text-stone-500 dark:border-stone-700 dark:text-stone-400">{t("workbench.taskWaitingInQueue")}</div>
+            ) : null}
+        </div>
+    );
 }
 
 function LogPanel({
@@ -683,6 +818,27 @@ function LogPanel({
     const { t } = useTranslation();
     const allSelected = Boolean(logs.length) && selectedLogIds.length === logs.length;
     const toggleAll = () => onSelectedLogIdsChange(allSelected ? [] : logs.map((log) => log.id));
+    const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+    const toggleGroup = (key: string) =>
+        setCollapsedGroups((value) => {
+            const next = new Set(value);
+            next.has(key) ? next.delete(key) : next.add(key);
+            return next;
+        });
+
+    const dateGroups = useMemo(() => groupLogsByDate(logs, (log) => log.createdAt), [logs]);
+
+    const renderLogList = (items: GenerationLog[]) =>
+        items.map((log) => (
+            <LogCard
+                key={log.id}
+                log={log}
+                selected={selectedLogIds.includes(log.id)}
+                active={activeLogId === log.id}
+                onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))}
+                onClick={() => onPreviewLog(log)}
+            />
+        ));
 
     return (
         <>
@@ -703,20 +859,66 @@ function LogPanel({
                     {t("common.delete")}
                 </Button>
             </div>
-            <div className="space-y-3">
-                {logs.map((log) => (
-                    <LogCard
-                        key={log.id}
-                        log={log}
-                        selected={selectedLogIds.includes(log.id)}
-                        active={activeLogId === log.id}
-                        onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))}
-                        onClick={() => onPreviewLog(log)}
-                    />
-                ))}
+            <div className="space-y-4">
+                {dateGroups.map((group) => {
+                    const groupKey = `date:${group.kind}`;
+                    const collapsed = collapsedGroups.has(groupKey);
+                    const clusters = clusterSimilarLogs(group.logs, (log) => logSimilarityKey(log.prompt, log.model));
+                    return (
+                        <div key={groupKey}>
+                            <button type="button" className="mb-2 flex w-full items-center justify-between gap-2 rounded px-1 py-1 text-left text-xs font-semibold uppercase tracking-wide text-stone-500 hover:bg-stone-100 dark:text-stone-400 dark:hover:bg-stone-900" onClick={() => toggleGroup(groupKey)}>
+                                <span>
+                                    {t(`workbench.logGroup.${group.kind}`)} · {group.logs.length}
+                                </span>
+                                <ChevronDown className={cn("size-3.5 transition-transform", collapsed && "-rotate-90")} />
+                            </button>
+                            {!collapsed ? (
+                                <div className="space-y-3">
+                                    {clusters.map((cluster) =>
+                                        cluster.logs.length > 1 ? (
+                                            <SimilarLogCluster key={cluster.key} logs={cluster.logs} renderLogList={renderLogList} />
+                                        ) : (
+                                            renderLogList(cluster.logs)
+                                        ),
+                                    )}
+                                </div>
+                            ) : null}
+                        </div>
+                    );
+                })}
                 {!logs.length ? <div className="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-stone-300 text-center text-sm text-stone-500 dark:border-stone-700">{t("workbench.noLogs")}</div> : null}
             </div>
         </>
+    );
+}
+
+function SimilarLogCluster({
+    logs,
+    renderLogList,
+}: {
+    logs: GenerationLog[];
+    renderLogList: (items: GenerationLog[]) => ReactNode;
+}) {
+    const { t } = useTranslation();
+    const [expanded, setExpanded] = useState(false);
+    const first = logs[0];
+
+    return (
+        <div className="rounded-lg border border-stone-200 bg-stone-50/60 p-2 dark:border-stone-800 dark:bg-stone-900/40">
+            <button type="button" className="flex w-full items-center justify-between gap-2 text-left" onClick={() => setExpanded((value) => !value)}>
+                <span className="min-w-0 flex-1 text-xs">
+                    <Typography.Paragraph ellipsis={{ rows: 1 }} className="!mb-0 font-medium">
+                        {first.prompt || first.title}
+                    </Typography.Paragraph>
+                    <span className="text-stone-500 dark:text-stone-400">{first.model}</span>
+                </span>
+                <span className="flex shrink-0 items-center gap-1.5">
+                    <Tag className="m-0 px-1.5 py-0">{t("workbench.similarCount", { count: logs.length })}</Tag>
+                    <ChevronDown className={cn("size-3.5 transition-transform", !expanded && "-rotate-90")} />
+                </span>
+            </button>
+            {expanded ? <div className="mt-2 space-y-3">{renderLogList(logs)}</div> : null}
+        </div>
     );
 }
 
